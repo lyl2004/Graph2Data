@@ -12,12 +12,19 @@ import cv2
 from .axes import AxisDetector, AxisDetectorConfig
 from .colors import CurveColorExtractor
 from .image_io import ensure_dir, load_bgr, write_json
+from .instances import (
+    filter_border_line_components,
+    group_line_style_curve_instances,
+    group_marker_curve_instances,
+    should_group_line_style_curve_instances,
+    should_group_marker_curve_instances,
+)
 from .layout import assign_text_to_regions, build_nine_grid
 from .legend import LegendDetector
 from .lines import LinePathExtractor, PathTracingConfig
 from .mapping import map_curve_paths_to_data, write_data_series_csv
 from .masks import CurveMaskExtractor
-from .models import DataRange, PipelineResult
+from .models import BoundingBox, CurvePath, DataRange, Point, PrototypeBinding, PipelineResult
 from .ocr import OCRDetector
 
 
@@ -57,8 +64,17 @@ class GraphExtractionPipeline:
         curves = []
         curve_masks = []
         curve_paths = []
+        line_components = []
+        marker_candidates = []
+        marker_curve_instances = []
+        line_style_curve_instances = []
+        prototype_bindings = []
+        prototype_bound_paths = []
         data_series = []
+        prototype_bound_data_series = []
         legends = []
+        legend_items = []
+        curve_visual_prototypes = []
         artifacts = {}
 
         if self.config.run_ocr:
@@ -75,6 +91,12 @@ class GraphExtractionPipeline:
                 legends = legend_detector.detect(ocr_results, axis.plot_area)
             image_legends = legend_detector.detect_from_image(image, axis.plot_area)
             legends = _merge_legend_detections(legends + image_legends)
+            if legends:
+                try:
+                    legend_items = legend_detector.extract_items(image, legends)
+                    curve_visual_prototypes = legend_detector.visual_prototypes_from_items(legend_items)
+                except Exception as exc:
+                    warnings.append(f"Legend item extraction failed: {exc}")
 
             if run_colors:
                 try:
@@ -88,7 +110,7 @@ class GraphExtractionPipeline:
 
             if curves and run_masks:
                 try:
-                    curve_masks, curve_paths, mask_artifacts = self._extract_masks_and_paths(
+                    curve_masks, curve_paths, line_components, marker_candidates, mask_artifacts = self._extract_masks_and_paths(
                         image=image,
                         curves=curves,
                         plot_bbox=axis.plot_area.bbox,
@@ -98,16 +120,61 @@ class GraphExtractionPipeline:
                         artifacts["masks"] = mask_artifacts
                 except Exception as exc:
                     warnings.append(f"Mask/path extraction failed: {exc}")
+            if axis.plot_area is not None and line_components:
+                line_components = filter_border_line_components(line_components, axis.plot_area.bbox)
+
+            if should_group_marker_curve_instances(marker_candidates, line_components):
+                marker_curve_instances = group_marker_curve_instances(
+                    marker_candidates,
+                    group_count=len(curve_visual_prototypes) if curve_visual_prototypes else None,
+                )
+            if not marker_curve_instances and should_group_line_style_curve_instances(line_components, len(curve_visual_prototypes)):
+                line_style_curve_instances = group_line_style_curve_instances(
+                    line_components,
+                    group_count=len(curve_visual_prototypes),
+                )
+
+            if curve_visual_prototypes and curves:
+                prototype_bindings = _score_prototype_bindings(
+                    curve_visual_prototypes,
+                    curves,
+                    line_components,
+                    marker_candidates,
+                    marker_curve_instances=marker_curve_instances,
+                    line_style_curve_instances=line_style_curve_instances,
+                )
+                prototype_bound_paths = _prototype_bound_marker_paths(
+                    curve_visual_prototypes,
+                    prototype_bindings,
+                    marker_curve_instances,
+                )
+                prototype_bound_paths.extend(
+                    _prototype_bound_line_style_paths(
+                        curve_visual_prototypes,
+                        prototype_bindings,
+                        line_style_curve_instances,
+                    )
+                )
 
             if self.config.run_mapping:
                 if curve_paths and self.config.data_range is not None:
                     try:
                         data_series = map_curve_paths_to_data(curve_paths, axis.plot_area, self.config.data_range)
+                        if prototype_bound_paths:
+                            prototype_bound_data_series = map_curve_paths_to_data(
+                                prototype_bound_paths,
+                                axis.plot_area,
+                                self.config.data_range,
+                            )
                         if self.config.artifact_dir:
                             data_dir = ensure_dir(os.path.join(self.config.artifact_dir, "data"))
                             data_csv_path = os.path.join(data_dir, "curves.csv")
                             write_data_series_csv(data_csv_path, data_series)
                             artifacts["data_csv"] = data_csv_path
+                            if prototype_bound_data_series:
+                                prototype_bound_csv_path = os.path.join(data_dir, "prototype_bound_curves.csv")
+                                write_data_series_csv(prototype_bound_csv_path, prototype_bound_data_series)
+                                artifacts["prototype_bound_data_csv"] = prototype_bound_csv_path
                     except Exception as exc:
                         warnings.append(f"Data mapping failed: {exc}")
                 elif self.config.data_range is None:
@@ -122,8 +189,14 @@ class GraphExtractionPipeline:
                             image=image,
                             axis=axis,
                             legends=legends,
+                            legend_items=legend_items,
                             curves=curves,
                             curve_paths=curve_paths,
+                            line_components=line_components,
+                            marker_candidates=marker_candidates,
+                            marker_curve_instances=marker_curve_instances,
+                            line_style_curve_instances=line_style_curve_instances,
+                            prototype_bound_paths=prototype_bound_paths,
                         )
                     except Exception as exc:
                         warnings.append(f"Debug artifact generation failed: {exc}")
@@ -142,10 +215,19 @@ class GraphExtractionPipeline:
                         image_path=image_path,
                         axis=axis,
                         legends=legends,
+                        legend_items=legend_items,
+                        curve_visual_prototypes=curve_visual_prototypes,
                         curves=curves,
                         curve_masks=curve_masks,
                         curve_paths=curve_paths,
+                        line_components=line_components,
+                        marker_candidates=marker_candidates,
+                        marker_curve_instances=marker_curve_instances,
+                        line_style_curve_instances=line_style_curve_instances,
+                        prototype_bindings=prototype_bindings,
+                        prototype_bound_paths=prototype_bound_paths,
                         data_series=data_series,
+                        prototype_bound_data_series=prototype_bound_data_series,
                         warnings=warnings,
                     ),
                 )
@@ -160,10 +242,19 @@ class GraphExtractionPipeline:
             ocr=ocr_results,
             layout=layout,
             legends=legends,
+            legend_items=legend_items,
+            curve_visual_prototypes=curve_visual_prototypes,
             curves=curves,
             curve_masks=curve_masks,
             curve_paths=curve_paths,
+            line_components=line_components,
+            marker_candidates=marker_candidates,
+            marker_curve_instances=marker_curve_instances,
+            line_style_curve_instances=line_style_curve_instances,
+            prototype_bindings=prototype_bindings,
+            prototype_bound_paths=prototype_bound_paths,
             data_series=data_series,
+            prototype_bound_data_series=prototype_bound_data_series,
             artifacts=artifacts,
             warnings=warnings,
         )
@@ -175,6 +266,8 @@ class GraphExtractionPipeline:
         )
         curve_masks = []
         curve_paths = []
+        line_components = []
+        marker_candidates = []
         mask_artifacts = {}
 
         mask_dir = None
@@ -195,13 +288,28 @@ class GraphExtractionPipeline:
                 mask_artifacts[prototype.curve_id] = mask_path
             curve_masks.append(mask_info)
 
+            mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            line_components.extend(path_extractor.classify_components_from_mask_image(mask_bgr, curve_id=prototype.curve_id))
+            marker_candidates.extend(path_extractor.detect_marker_candidates_from_mask_image(mask_bgr, curve_id=prototype.curve_id))
             if self.config.run_paths or self.config.run_mapping:
-                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 curve_paths.append(path_extractor.extract_from_mask_image(mask_bgr, curve_id=prototype.curve_id))
 
-        return curve_masks, curve_paths, mask_artifacts
+        return curve_masks, curve_paths, line_components, marker_candidates, mask_artifacts
 
-    def _write_debug_artifacts(self, image, axis, legends, curves, curve_paths):
+    def _write_debug_artifacts(
+        self,
+        image,
+        axis,
+        legends,
+        legend_items,
+        curves,
+        curve_paths,
+        line_components,
+        marker_candidates,
+        marker_curve_instances,
+        line_style_curve_instances,
+        prototype_bound_paths,
+    ):
         debug_dir = ensure_dir(os.path.join(self.config.artifact_dir, "debug"))
         artifacts = {}
 
@@ -218,6 +326,74 @@ class GraphExtractionPipeline:
         overview_path = os.path.join(debug_dir, "overview.png")
         cv2.imwrite(overview_path, overview)
         artifacts["overview"] = overview_path
+
+        if legend_items:
+            legend_overlay = image.copy()
+            for legend in legends:
+                _draw_bbox(legend_overlay, legend.bbox, (0, 255, 255), 2)
+            for item in legend_items:
+                _draw_bbox(legend_overlay, item.bbox, (0, 180, 0), 2)
+                if item.sample_bbox is not None:
+                    _draw_bbox(legend_overlay, item.sample_bbox, (255, 128, 0), 1)
+                if item.text_bbox is not None:
+                    _draw_bbox(legend_overlay, item.text_bbox, (255, 0, 255), 1)
+                _draw_legend_item_label(legend_overlay, item)
+            legend_items_path = os.path.join(debug_dir, "legend_items.png")
+            cv2.imwrite(legend_items_path, legend_overlay)
+            artifacts["legend_items"] = legend_items_path
+
+        if line_components:
+            component_overlay = image.copy()
+            if axis.plot_area is not None:
+                _draw_bbox(component_overlay, axis.plot_area.bbox, (0, 180, 255), 2)
+            for component in line_components:
+                color = _component_class_color(component.class_label)
+                _draw_bbox(component_overlay, component.bbox, color, 1)
+            component_path = os.path.join(debug_dir, "component_classification.png")
+            cv2.imwrite(component_path, component_overlay)
+            artifacts["component_classification"] = component_path
+
+        if marker_candidates:
+            marker_overlay = image.copy()
+            if axis.plot_area is not None:
+                _draw_bbox(marker_overlay, axis.plot_area.bbox, (0, 180, 255), 2)
+            for marker in marker_candidates:
+                _draw_bbox(marker_overlay, marker.bbox, (255, 128, 0), 1)
+                _draw_marker_center(marker_overlay, marker)
+            marker_path = os.path.join(debug_dir, "marker_candidates.png")
+            cv2.imwrite(marker_path, marker_overlay)
+            artifacts["marker_candidates"] = marker_path
+
+        if marker_candidates or marker_curve_instances:
+            instance_overlay = image.copy()
+            if axis.plot_area is not None:
+                _draw_bbox(instance_overlay, axis.plot_area.bbox, (0, 180, 255), 2)
+            for idx, instance in enumerate(marker_curve_instances):
+                color = _instance_color(idx)
+                _draw_marker_instance(instance_overlay, instance, color)
+            instance_path = os.path.join(debug_dir, "marker_curve_instances.png")
+            cv2.imwrite(instance_path, instance_overlay)
+            artifacts["marker_curve_instances"] = instance_path
+
+        if line_style_curve_instances:
+            line_instance_overlay = image.copy()
+            if axis.plot_area is not None:
+                _draw_bbox(line_instance_overlay, axis.plot_area.bbox, (0, 180, 255), 2)
+            for idx, instance in enumerate(line_style_curve_instances):
+                _draw_line_style_instance(line_instance_overlay, instance, _instance_color(idx))
+            line_instance_path = os.path.join(debug_dir, "line_style_curve_instances.png")
+            cv2.imwrite(line_instance_path, line_instance_overlay)
+            artifacts["line_style_curve_instances"] = line_instance_path
+
+        if prototype_bound_paths:
+            bound_path_overlay = image.copy()
+            if axis.plot_area is not None:
+                _draw_bbox(bound_path_overlay, axis.plot_area.bbox, (0, 180, 255), 2)
+            for idx, path in enumerate(prototype_bound_paths):
+                _draw_confidence_curve_path(bound_path_overlay, path, _instance_color(idx), 2, max_segment_px=80.0)
+            bound_path_path = os.path.join(debug_dir, "prototype_bound_paths.png")
+            cv2.imwrite(bound_path_path, bound_path_overlay)
+            artifacts["prototype_bound_paths"] = bound_path_path
 
         if curve_paths:
             path_dir = ensure_dir(os.path.join(debug_dir, "paths"))
@@ -248,10 +424,19 @@ class GraphExtractionPipeline:
         image_path,
         axis,
         legends,
+        legend_items,
+        curve_visual_prototypes,
         curves,
         curve_masks,
         curve_paths,
+        line_components,
+        marker_candidates,
+        marker_curve_instances,
+        line_style_curve_instances,
+        prototype_bindings,
+        prototype_bound_paths,
         data_series,
+        prototype_bound_data_series,
         warnings,
     ):
         path_points = sum(len(path.pixel_points_ordered) for path in curve_paths)
@@ -276,11 +461,42 @@ class GraphExtractionPipeline:
             },
             "counts": {
                 "legend_count": len(legends),
+                "legend_item_count": len(legend_items),
+                "curve_visual_prototype_count": len(curve_visual_prototypes),
                 "curve_prototype_count": len(curves),
                 "curve_mask_count": len(curve_masks),
                 "curve_path_count": len(curve_paths),
+                "line_component_count": len(line_components),
+                "marker_candidate_count": len(marker_candidates),
+                "marker_curve_instance_count": len(marker_curve_instances),
+                "line_style_curve_instance_count": len(line_style_curve_instances),
+                "prototype_binding_count": len(prototype_bindings),
+                "prototype_bound_path_count": len(prototype_bound_paths),
                 "data_series_count": len(data_series),
+                "prototype_bound_data_series_count": len(prototype_bound_data_series),
             },
+            "legends": [
+                {
+                    "bbox": legend.bbox,
+                    "confidence": legend.confidence,
+                    "source": legend.source,
+                    "warnings": legend.warnings,
+                }
+                for legend in legends
+            ],
+            "legend_items": legend_items,
+            "line_components": line_components,
+            "component_summary": _component_summary(line_components),
+            "marker_candidates": marker_candidates,
+            "marker_summary": _marker_summary(marker_candidates),
+            "marker_curve_instances": marker_curve_instances,
+            "marker_instance_summary": _marker_instance_summary(marker_curve_instances),
+            "line_style_curve_instances": line_style_curve_instances,
+            "line_style_instance_summary": _line_style_instance_summary(line_style_curve_instances),
+            "prototype_bindings": prototype_bindings,
+            "binding_summary": _binding_summary(prototype_bindings),
+            "prototype_bound_paths": prototype_bound_paths,
+            "prototype_bound_path_summary": _prototype_bound_path_summary(prototype_bound_paths),
             "path_summary": {
                 "total_point_count": path_points,
                 "total_completed_point_count": completed_points,
@@ -297,6 +513,16 @@ class GraphExtractionPipeline:
                     sum(series.point_count for series in data_series),
                 ),
                 "series_with_warnings": sum(1 for series in data_series if series.warnings),
+            },
+            "prototype_bound_data_series": prototype_bound_data_series,
+            "prototype_bound_data_summary": {
+                "total_point_count": sum(series.point_count for series in prototype_bound_data_series),
+                "total_completed_point_count": sum(series.completed_point_count for series in prototype_bound_data_series),
+                "completed_point_ratio": _safe_ratio(
+                    sum(series.completed_point_count for series in prototype_bound_data_series),
+                    sum(series.point_count for series in prototype_bound_data_series),
+                ),
+                "series_with_warnings": sum(1 for series in prototype_bound_data_series if series.warnings),
             },
             "curves": [
                 _curve_quality_row(curve.curve_id, mask_by_id.get(curve.curve_id), path_by_id.get(curve.curve_id), series_by_id.get(curve.curve_id))
@@ -330,6 +556,23 @@ def _draw_curve_path(image, curve_path, color, thickness, max_segment_px=8.0):
         cv2.line(image, p0, p1, color, thickness)
 
 
+def _draw_confidence_curve_path(image, curve_path, color, thickness, max_segment_px=8.0):
+    points = curve_path.pixel_points_ordered
+    if len(points) < 2:
+        return
+    confidences = curve_path.confidence_per_point or [curve_path.confidence for _ in points]
+    completed_color = (0, 200, 255)
+    for idx, (a, b) in enumerate(zip(points, points[1:])):
+        if ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5 > max_segment_px:
+            continue
+        conf_a = confidences[idx] if idx < len(confidences) else curve_path.confidence
+        conf_b = confidences[idx + 1] if idx + 1 < len(confidences) else curve_path.confidence
+        segment_color = completed_color if min(conf_a, conf_b) < 0.5 else color
+        p0 = (int(round(a.x)), int(round(a.y)))
+        p1 = (int(round(b.x)), int(round(b.y)))
+        cv2.line(image, p0, p1, segment_color, thickness)
+
+
 def _draw_curve_swatches(image, curves):
     x0, y0 = 12, 12
     for idx, curve in enumerate(curves[:12]):
@@ -337,6 +580,552 @@ def _draw_curve_swatches(image, curves):
         color = _curve_bgr(curve)
         cv2.rectangle(image, (x0, y), (x0 + 28, y + 10), color, -1)
         cv2.rectangle(image, (x0, y), (x0 + 28, y + 10), (40, 40, 40), 1)
+
+
+def _draw_legend_item_label(image, item):
+    x = int(round(item.bbox.x_min))
+    y = max(12, int(round(item.bbox.y_min)) - 4)
+    text = item.item_id
+    if item.line_style != "unknown":
+        text += f" {item.line_style}"
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (20, 20, 20), 2, cv2.LINE_AA)
+    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def _component_class_color(class_label):
+    if class_label == "line_like":
+        return (0, 180, 0)
+    if class_label == "marker_like":
+        return (255, 128, 0)
+    return (0, 0, 255)
+
+
+def _draw_marker_center(image, marker):
+    center = (int(round(marker.center.x)), int(round(marker.center.y)))
+    cv2.drawMarker(image, center, (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=8, thickness=1)
+
+
+def _draw_marker_instance(image, instance, color):
+    points = sorted(instance.points, key=lambda point: (point.x, point.y))
+    for point in points:
+        center = (int(round(point.x)), int(round(point.y)))
+        cv2.circle(image, center, 4, color, 1)
+    for a, b in zip(points, points[1:]):
+        p0 = (int(round(a.x)), int(round(a.y)))
+        p1 = (int(round(b.x)), int(round(b.y)))
+        cv2.line(image, p0, p1, color, 1)
+    if points:
+        cv2.putText(
+            image,
+            instance.instance_id,
+            (int(round(points[0].x)), int(round(points[0].y)) - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def _draw_line_style_instance(image, instance, color):
+    if instance.x_min is None or instance.x_max is None or instance.y_min is None or instance.y_max is None:
+        return
+    bbox = BoundingBox(instance.x_min, instance.y_min, instance.x_max, instance.y_max)
+    _draw_bbox(image, bbox, color, 2)
+    label = f"{instance.instance_id} {instance.estimated_line_style}"
+    cv2.putText(
+        image,
+        label,
+        (int(round(instance.x_min)), max(12, int(round(instance.y_min)) - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        color,
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _instance_color(idx):
+    colors = [
+        (0, 0, 255),
+        (0, 180, 0),
+        (255, 0, 0),
+        (0, 180, 255),
+        (180, 0, 255),
+        (255, 128, 0),
+        (128, 0, 128),
+        (0, 128, 128),
+    ]
+    return colors[idx % len(colors)]
+
+
+def _component_summary(line_components):
+    by_class = {}
+    for component in line_components:
+        by_class[component.class_label] = by_class.get(component.class_label, 0) + 1
+    return {
+        "by_class": by_class,
+        "line_like_count": by_class.get("line_like", 0),
+        "marker_like_count": by_class.get("marker_like", 0),
+        "noise_count": by_class.get("noise", 0),
+    }
+
+
+def _marker_summary(marker_candidates):
+    by_shape = {}
+    for marker in marker_candidates:
+        by_shape[marker.shape] = by_shape.get(marker.shape, 0) + 1
+    return {
+        "by_shape": by_shape,
+        "candidate_count": len(marker_candidates),
+        "mean_confidence": _mean_values([marker.confidence for marker in marker_candidates]),
+    }
+
+
+def _marker_instance_summary(marker_curve_instances):
+    return {
+        "instance_count": len(marker_curve_instances),
+        "total_marker_count": sum(instance.marker_count for instance in marker_curve_instances),
+        "mean_marker_count": _mean_values([instance.marker_count for instance in marker_curve_instances]),
+        "mean_confidence": _mean_values([instance.confidence for instance in marker_curve_instances]),
+        "grouping_methods": sorted({instance.grouping_method for instance in marker_curve_instances}),
+    }
+
+
+def _line_style_instance_summary(line_style_curve_instances):
+    by_style = {}
+    for instance in line_style_curve_instances:
+        by_style[instance.estimated_line_style] = by_style.get(instance.estimated_line_style, 0) + 1
+    return {
+        "instance_count": len(line_style_curve_instances),
+        "by_estimated_line_style": by_style,
+        "mean_component_count": _mean_values([instance.component_count for instance in line_style_curve_instances]),
+        "mean_confidence": _mean_values([instance.confidence for instance in line_style_curve_instances]),
+        "grouping_methods": sorted({instance.grouping_method for instance in line_style_curve_instances}),
+    }
+
+
+def _prototype_bound_path_summary(prototype_bound_paths):
+    total_points = sum(len(path.pixel_points_ordered) for path in prototype_bound_paths)
+    total_completed_points = sum(path.completed_pixel_count for path in prototype_bound_paths)
+    return {
+        "path_count": len(prototype_bound_paths),
+        "total_point_count": total_points,
+        "total_completed_point_count": total_completed_points,
+        "completed_point_ratio": _safe_ratio(total_completed_points, total_points),
+        "mean_point_count": _mean_values([len(path.pixel_points_ordered) for path in prototype_bound_paths]),
+        "mean_confidence": _mean_values([path.confidence for path in prototype_bound_paths]),
+    }
+
+
+def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_curve_instances):
+    if not visual_prototypes or not prototype_bindings or not marker_curve_instances:
+        return []
+    marker_by_id = {instance.instance_id: instance for instance in marker_curve_instances}
+    best_by_prototype = {}
+    for binding in prototype_bindings:
+        current = best_by_prototype.get(binding.prototype_id)
+        if current is None or binding.score > current.score:
+            best_by_prototype[binding.prototype_id] = binding
+
+    paths = []
+    used_marker_instance_ids = set()
+    for prototype in visual_prototypes:
+        binding = best_by_prototype.get(prototype.prototype_id)
+        if binding is None or binding.target_type != "marker_instance":
+            continue
+        if binding.target_curve_id in used_marker_instance_ids:
+            continue
+        instance = marker_by_id.get(binding.target_curve_id)
+        if instance is None or not instance.points:
+            continue
+        used_marker_instance_ids.add(binding.target_curve_id)
+        points = sorted(instance.points, key=lambda point: (point.x, point.y))
+        confidence = min(float(binding.confidence), float(instance.confidence), float(prototype.confidence))
+        warnings = [
+            f"prototype_id={prototype.prototype_id}",
+            f"legend_item_id={prototype.legend_item_id}",
+            f"binding_id={binding.binding_id}",
+            f"target_marker_instance={instance.instance_id}",
+            "prototype_bound_marker_path",
+        ]
+        paths.append(
+            CurvePath(
+                curve_id=f"{prototype.prototype_id}_bound_path",
+                pixel_points_ordered=points,
+                confidence_per_point=[confidence for _ in points],
+                endpoints=[points[0], points[-1]] if len(points) >= 2 else list(points),
+                component_count=1,
+                observed_pixel_count=len(points),
+                path_length_px=_point_path_length(points),
+                confidence=confidence,
+                warnings=warnings + list(binding.warnings) + list(instance.warnings),
+            )
+        )
+    return paths
+
+
+def _prototype_bound_line_style_paths(visual_prototypes, prototype_bindings, line_style_curve_instances):
+    if not visual_prototypes or not prototype_bindings or not line_style_curve_instances:
+        return []
+    line_instance_by_id = {instance.instance_id: instance for instance in line_style_curve_instances}
+    best_by_prototype = {}
+    for binding in prototype_bindings:
+        current = best_by_prototype.get(binding.prototype_id)
+        if current is None or binding.score > current.score:
+            best_by_prototype[binding.prototype_id] = binding
+
+    paths = []
+    used_line_instance_ids = set()
+    for prototype in visual_prototypes:
+        binding = best_by_prototype.get(prototype.prototype_id)
+        if binding is None or binding.target_type != "line_style_instance":
+            continue
+        if binding.target_curve_id in used_line_instance_ids:
+            continue
+        instance = line_instance_by_id.get(binding.target_curve_id)
+        if instance is None or not instance.points:
+            continue
+        used_line_instance_ids.add(binding.target_curve_id)
+        observed_points = _compress_line_style_points(sorted(instance.points, key=lambda point: (point.x, point.y)))
+        points, completed_ranges, gap_stats = _connect_line_style_points(observed_points)
+        confidence = min(float(binding.confidence), float(instance.confidence), float(prototype.confidence))
+        warnings = [
+            f"prototype_id={prototype.prototype_id}",
+            f"legend_item_id={prototype.legend_item_id}",
+            f"binding_id={binding.binding_id}",
+            f"target_line_style_instance={instance.instance_id}",
+            "prototype_bound_line_style_path",
+        ]
+        if gap_stats["connected_gap_count"]:
+            warnings.append(f"line_style_gaps_connected={gap_stats['connected_gap_count']}")
+        if gap_stats["rejected_gap_count"]:
+            warnings.append(f"line_style_gaps_rejected={gap_stats['rejected_gap_count']}")
+        paths.append(
+            CurvePath(
+                curve_id=f"{prototype.prototype_id}_bound_path",
+                pixel_points_ordered=points,
+                completed_ranges=completed_ranges,
+                confidence_per_point=_line_style_point_confidences(len(points), completed_ranges, confidence),
+                endpoints=[points[0], points[-1]] if len(points) >= 2 else list(points),
+                component_count=max(1, instance.component_count),
+                observed_pixel_count=len(observed_points),
+                completed_pixel_count=sum(max(0, end - start + 1) for start, end in completed_ranges),
+                path_length_px=_point_path_length(points),
+                confidence=confidence,
+                warnings=warnings + list(binding.warnings) + list(instance.warnings),
+            )
+        )
+    return paths
+
+
+def _connect_line_style_points(points, max_gap_px=95.0, step_px=4.0):
+    if len(points) < 2:
+        return list(points), [], {"connected_gap_count": 0, "rejected_gap_count": 0}
+    connected = [points[0]]
+    completed_ranges = []
+    connected_gap_count = 0
+    rejected_gap_count = 0
+    for idx, (prev, current) in enumerate(zip(points, points[1:])):
+        distance = ((float(current.x) - float(prev.x)) ** 2 + (float(current.y) - float(prev.y)) ** 2) ** 0.5
+        should_connect = _should_connect_line_style_gap(points, idx, distance, max_gap_px)
+        if should_connect:
+            steps = max(1, int(distance // step_px))
+            start_idx = len(connected)
+            for step in range(1, steps):
+                t = step / float(steps)
+                connected.append(
+                    Point(
+                        float(prev.x) + (float(current.x) - float(prev.x)) * t,
+                        float(prev.y) + (float(current.y) - float(prev.y)) * t,
+                    )
+                )
+            end_idx = len(connected) - 1
+            if end_idx >= start_idx:
+                completed_ranges.append((start_idx, end_idx))
+                connected_gap_count += 1
+        elif distance > 1.0:
+            rejected_gap_count += 1
+        connected.append(current)
+    return connected, completed_ranges, {
+        "connected_gap_count": connected_gap_count,
+        "rejected_gap_count": rejected_gap_count,
+    }
+
+
+def _should_connect_line_style_gap(points, idx, distance, max_gap_px):
+    if distance <= 1.0 or distance > max_gap_px:
+        return False
+    prev = points[idx]
+    current = points[idx + 1]
+    dx = float(current.x) - float(prev.x)
+    dy = float(current.y) - float(prev.y)
+    if dx <= 0:
+        return False
+    if abs(dy) > max(32.0, abs(dx) * 0.85):
+        return False
+
+    gap_angle = _angle_degrees(dx, dy)
+    tangent_angles = []
+    if idx > 0:
+        before = points[idx - 1]
+        before_dx = float(prev.x) - float(before.x)
+        before_dy = float(prev.y) - float(before.y)
+        if before_dx > 0:
+            tangent_angles.append(_angle_degrees(before_dx, before_dy))
+    if idx + 2 < len(points):
+        after = points[idx + 2]
+        after_dx = float(after.x) - float(current.x)
+        after_dy = float(after.y) - float(current.y)
+        if after_dx > 0:
+            tangent_angles.append(_angle_degrees(after_dx, after_dy))
+    if tangent_angles:
+        max_diff = max(_angle_difference(gap_angle, angle) for angle in tangent_angles)
+        if max_diff > 70.0:
+            return False
+    return True
+
+
+def _angle_degrees(dx, dy):
+    import math
+
+    return math.degrees(math.atan2(float(dy), float(dx)))
+
+
+def _angle_difference(a, b):
+    diff = abs(float(a) - float(b)) % 360.0
+    return min(diff, 360.0 - diff)
+
+
+def _compress_line_style_points(points):
+    if not points:
+        return []
+    grouped = {}
+    for point in points:
+        key = int(round(float(point.x)))
+        grouped.setdefault(key, []).append(float(point.y))
+    compressed = [
+        Point(float(x_key), sum(y_values) / len(y_values))
+        for x_key, y_values in sorted(grouped.items())
+    ]
+    return compressed
+
+
+def _line_style_point_confidences(point_count, completed_ranges, observed_confidence, completed_confidence=0.35):
+    confidences = [float(observed_confidence) for _ in range(point_count)]
+    for start, end in completed_ranges:
+        for idx in range(int(start), int(end) + 1):
+            if 0 <= idx < len(confidences):
+                confidences[idx] = float(min(confidences[idx], completed_confidence))
+    return confidences
+
+
+def _score_prototype_bindings(
+    visual_prototypes,
+    curves,
+    line_components,
+    marker_candidates,
+    marker_curve_instances=None,
+    line_style_curve_instances=None,
+):
+    bindings = []
+    marker_curve_instances = marker_curve_instances or []
+    line_style_curve_instances = line_style_curve_instances or []
+    line_by_curve = {}
+    marker_by_curve = {}
+    for component in line_components:
+        line_by_curve.setdefault(component.curve_id, []).append(component)
+    for marker in marker_candidates:
+        marker_by_curve.setdefault(marker.curve_id, []).append(marker)
+
+    for proto_idx, proto in enumerate(visual_prototypes):
+        for curve in curves:
+            color_similarity = _rgb_similarity(proto.rgb, curve.rgb)
+            line_similarity = _line_similarity(proto.line_style, line_by_curve.get(curve.curve_id, []))
+            marker_similarity = _marker_similarity(proto.marker_style, marker_by_curve.get(curve.curve_id, []))
+            score_parts = []
+            weights = []
+            warnings = []
+            if color_similarity is not None:
+                score_parts.append(0.55 * color_similarity)
+                weights.append(0.55)
+            else:
+                warnings.append("missing_color_similarity")
+            if line_similarity is not None:
+                score_parts.append(0.20 * line_similarity)
+                weights.append(0.20)
+            else:
+                warnings.append("missing_line_similarity")
+            if marker_similarity is not None:
+                score_parts.append(0.25 * marker_similarity)
+                weights.append(0.25)
+            else:
+                warnings.append("missing_marker_similarity")
+
+            score = sum(score_parts) / max(sum(weights), 1e-9)
+            if proto.marker_style == "unknown":
+                warnings.append("prototype_marker_unknown")
+            bindings.append(
+                PrototypeBinding(
+                    binding_id=f"binding_{len(bindings):04d}",
+                    prototype_id=proto.prototype_id,
+                    legend_item_id=proto.legend_item_id,
+                    target_curve_id=curve.curve_id,
+                    target_type="curve",
+                    score=float(score),
+                    color_similarity=color_similarity,
+                    line_similarity=line_similarity,
+                    marker_similarity=marker_similarity,
+                    confidence=float(min(1.0, score * proto.confidence)),
+                    warnings=warnings,
+                )
+            )
+        ordered_marker_instances = sorted(marker_curve_instances, key=lambda item: float(item.center_y), reverse=True)
+        for instance_idx, instance in enumerate(ordered_marker_instances):
+            marker_similarity = _marker_instance_similarity(proto, instance)
+            ordinal_similarity = _ordinal_similarity(proto_idx, instance_idx, len(visual_prototypes), len(marker_curve_instances))
+            score = 0.65 * marker_similarity + 0.35 * ordinal_similarity
+            warnings = []
+            if proto.marker_style == "unknown":
+                warnings.append("prototype_marker_unknown")
+            bindings.append(
+                PrototypeBinding(
+                    binding_id=f"binding_{len(bindings):04d}",
+                    prototype_id=proto.prototype_id,
+                    legend_item_id=proto.legend_item_id,
+                    target_curve_id=instance.instance_id,
+                    target_type="marker_instance",
+                    score=float(score),
+                    color_similarity=None,
+                    line_similarity=None,
+                    marker_similarity=float(marker_similarity),
+                    confidence=float(min(1.0, score * proto.confidence)),
+                    source="marker_instance_score",
+                    warnings=warnings,
+                )
+            )
+        ordered_line_instances = sorted(line_style_curve_instances, key=lambda item: float(item.center_y), reverse=True)
+        for instance_idx, instance in enumerate(ordered_line_instances):
+            line_similarity = _line_style_instance_similarity(proto.line_style, instance.estimated_line_style)
+            ordinal_similarity = _ordinal_similarity(proto_idx, instance_idx, len(visual_prototypes), len(line_style_curve_instances))
+            score = 0.80 * ordinal_similarity + 0.10 * line_similarity + 0.10 * instance.confidence
+            warnings = []
+            if proto.line_style == "unknown":
+                warnings.append("prototype_line_style_unknown")
+            if instance.estimated_line_style == "unknown":
+                warnings.append("line_instance_style_unknown")
+            bindings.append(
+                PrototypeBinding(
+                    binding_id=f"binding_{len(bindings):04d}",
+                    prototype_id=proto.prototype_id,
+                    legend_item_id=proto.legend_item_id,
+                    target_curve_id=instance.instance_id,
+                    target_type="line_style_instance",
+                    score=float(score),
+                    color_similarity=None,
+                    line_similarity=float(line_similarity),
+                    marker_similarity=None,
+                    confidence=float(min(1.0, score * proto.confidence)),
+                    source="line_style_instance_score",
+                    warnings=warnings,
+                )
+            )
+    bindings.sort(key=lambda item: (item.prototype_id, -item.score, item.target_curve_id))
+    return bindings
+
+
+def _rgb_similarity(a, b):
+    if a is None or b is None:
+        return None
+    dist = sum((float(x) - float(y)) ** 2 for x, y in zip(a, b)) ** 0.5
+    return float(max(0.0, 1.0 - dist / 441.67295593))
+
+
+def _line_similarity(line_style, components):
+    if not components:
+        return 0.0
+    line_like_count = sum(1 for component in components if component.class_label == "line_like")
+    marker_like_count = sum(1 for component in components if component.class_label == "marker_like")
+    if line_style == "unknown":
+        return 0.5 if line_like_count else 0.25
+    if line_style == "solid":
+        return 1.0 if line_like_count else 0.25
+    if line_style in {"dashed", "dotted"}:
+        if marker_like_count > line_like_count:
+            return 0.85
+        return 0.65 if len(components) > 3 else 0.35
+    return 0.5
+
+
+def _marker_similarity(marker_style, markers):
+    if not markers:
+        return 0.0
+    if marker_style == "unknown":
+        return 0.5
+    known_shapes = {marker.shape for marker in markers if marker.shape != "unknown"}
+    if not known_shapes:
+        return 0.35
+    if marker_style in known_shapes:
+        return 1.0
+    if marker_style in {"single_compact", "repeated_compact"}:
+        return 0.75
+    return 0.25
+
+
+def _marker_instance_similarity(proto, instance):
+    if instance.marker_count <= 0:
+        return 0.0
+    base = min(1.0, instance.marker_count / 8.0)
+    if proto.marker_style == "unknown":
+        return 0.80 * base
+    return min(1.0, 0.80 * base + 0.20)
+
+
+def _line_style_instance_similarity(prototype_style, instance_style):
+    if prototype_style == "unknown" or instance_style == "unknown":
+        return 0.45
+    if prototype_style == instance_style:
+        return 1.0
+    if prototype_style in {"dashed", "dotted"} and instance_style in {"dashed", "dotted"}:
+        return 0.65
+    if prototype_style == "solid" and instance_style in {"dashed", "dotted"}:
+        return 0.20
+    if instance_style == "solid" and prototype_style in {"dashed", "dotted"}:
+        return 0.20
+    return 0.35
+
+
+def _ordinal_similarity(proto_idx, instance_idx, prototype_count, instance_count):
+    if prototype_count <= 1 or instance_count <= 1:
+        return 0.5
+    scale = max(prototype_count - 1, instance_count - 1, 1)
+    return max(0.0, 1.0 - abs(float(proto_idx) - float(instance_idx)) / float(scale))
+
+
+def _binding_summary(bindings):
+    if not bindings:
+        return {"binding_count": 0, "best_by_prototype": []}
+    best = {}
+    for binding in bindings:
+        current = best.get(binding.prototype_id)
+        if current is None or binding.score > current.score:
+            best[binding.prototype_id] = binding
+    return {
+        "binding_count": len(bindings),
+        "prototype_count": len(best),
+        "mean_best_score": _mean_values([binding.score for binding in best.values()]),
+        "best_by_prototype": [
+            {
+                "prototype_id": binding.prototype_id,
+                "legend_item_id": binding.legend_item_id,
+                "target_curve_id": binding.target_curve_id,
+                "target_type": binding.target_type,
+                "score": binding.score,
+                "warnings": binding.warnings,
+            }
+            for binding in sorted(best.values(), key=lambda item: item.prototype_id)
+        ],
+    }
 
 
 def _curve_bgr(curve):
@@ -371,6 +1160,15 @@ def _safe_ratio(numerator: float, denominator: float):
     if denominator <= 0:
         return None
     return float(numerator) / float(denominator)
+
+
+def _point_path_length(points):
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    for a, b in zip(points, points[1:]):
+        total += ((float(a.x) - float(b.x)) ** 2 + (float(a.y) - float(b.y)) ** 2) ** 0.5
+    return float(total)
 
 
 def _mean_values(values: Sequence[float]):

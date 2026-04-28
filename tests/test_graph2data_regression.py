@@ -8,8 +8,9 @@ import pytest
 import numpy as np
 import cv2
 
-from graph2data.benchmark import run_suite
+from graph2data.benchmark import run_prototype_binding_benchmark, run_suite
 from graph2data.image_io import load_bgr
+from graph2data.instances import group_marker_curve_instances
 from graph2data.legend import LegendDetector
 from graph2data.lines import (
     LinePathExtractor,
@@ -20,9 +21,10 @@ from graph2data.lines import (
     _prune_short_spurs,
     _segment_connection_cost,
 )
-from graph2data.mapping import map_curve_path_to_data
+from graph2data.mapping import map_curve_path_to_data, map_curve_paths_to_data, write_data_series_csv
 from graph2data.masks import _filter_components
-from graph2data.models import BoundingBox, CurvePath, DataRange, PlotArea, Point
+from graph2data.models import BoundingBox, CurvePath, CurveVisualPrototype, DataRange, LineStyleCurveInstance, MarkerCurveInstance, PlotArea, Point, PrototypeBinding
+from graph2data.pipeline import _prototype_bound_line_style_paths, _prototype_bound_marker_paths
 from graph2data.pipeline import GraphExtractionPipeline, PipelineConfig
 from graph2data.quality import evaluate_data_series
 from graph2data.synthetic import SyntheticConfig, generate_benchmark
@@ -262,6 +264,53 @@ def test_path_extractor_keeps_dotted_curve_when_no_line_anchor_exists():
     assert not any(warning.startswith("marker_like_components_skipped=") for warning in path.warnings)
 
 
+def test_component_classifier_distinguishes_line_marker_and_noise():
+    mask = np.zeros((90, 180), dtype=np.uint8)
+    cv2.line(mask, (10, 45), (150, 45), 255, 3)
+    cv2.line(mask, (35, 12), (35, 24), 255, 2)
+    cv2.line(mask, (29, 18), (41, 18), 255, 2)
+    mask[72, 165] = 255
+
+    extractor = LinePathExtractor(PathTracingConfig())
+    components = extractor.classify_components_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+    labels = {component.class_label for component in components}
+
+    assert "line_like" in labels
+    assert "marker_like" in labels
+    assert "noise" in labels
+
+
+def test_marker_candidate_detector_uses_original_mask_shape_features():
+    mask = np.zeros((90, 180), dtype=np.uint8)
+    cv2.circle(mask, (25, 25), 7, 255, -1)
+    cv2.rectangle(mask, (60, 18), (74, 32), 255, -1)
+    cv2.line(mask, (112, 18), (112, 32), 255, 2)
+    cv2.line(mask, (105, 25), (119, 25), 255, 2)
+
+    extractor = LinePathExtractor(PathTracingConfig())
+    markers = extractor.detect_marker_candidates_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+    shapes = {marker.shape for marker in markers}
+
+    assert len(markers) == 3
+    assert "circle_like" in shapes
+    assert "square_like" in shapes
+    assert "cross_like" in shapes
+    assert all(marker.center.x > 0 and marker.center.y > 0 for marker in markers)
+
+
+def test_marker_candidate_detector_finds_blobs_connected_to_line():
+    mask = np.zeros((90, 220), dtype=np.uint8)
+    cv2.line(mask, (10, 45), (205, 45), 255, 2)
+    for center in ((45, 45), (100, 45), (155, 45)):
+        cv2.circle(mask, center, 7, 255, -1)
+
+    extractor = LinePathExtractor(PathTracingConfig())
+    markers = extractor.detect_marker_candidates_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+
+    assert len(markers) >= 3
+    assert sum(1 for marker in markers if "distance_transform_candidate" in marker.warnings) >= 3
+
+
 def test_segment_connection_cost_rejects_large_backward_jump():
     current = _segment((0, 0), (10, 0), (5.0, 0.0), (5.0, 0.0))
     candidate = _segment((6, 0), (12, 0), (5.0, 0.0), (5.0, 0.0))
@@ -302,6 +351,95 @@ def test_image_legend_detection_finds_in_plot_legend_without_ocr(tmp_path):
     assert legend.bbox.height >= 90
 
 
+def test_legend_item_extraction_splits_detected_legend_into_rows(tmp_path):
+    manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "legend_inside_items",
+        SyntheticConfig(seed=42, n_curves=6, palette="basic", legend_inside=True),
+    )
+    image = load_bgr(manifest["image_path"])
+    plot_area = _truth_plot_area(manifest["truth_axes_path"])
+    detector = LegendDetector()
+    legends = detector.detect_from_image(image, plot_area)
+
+    assert legends
+
+    items = detector.extract_items(image, legends)
+    prototypes = detector.visual_prototypes_from_items(items)
+
+    assert len(items) >= 4
+    assert len(prototypes) >= 4
+    assert all(item.sample_bbox is not None for item in items)
+    assert any(item.text_bbox is not None for item in items)
+    assert any(item.line_style in {"solid", "dashed", "dotted"} for item in items)
+    assert all(item.foreground_pixel_count > 0 for item in items)
+
+
+def test_legend_item_extraction_records_marker_style_when_visible(tmp_path):
+    manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "same_color_marker_legend_items",
+        SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True, legend_inside=True),
+    )
+    image = load_bgr(manifest["image_path"])
+    plot_area = _truth_plot_area(manifest["truth_axes_path"])
+    detector = LegendDetector()
+    legends = detector.detect_from_image(image, plot_area)
+    items = detector.extract_items(image, legends)
+
+    assert len(items) == 4
+    assert any(item.marker_style != "unknown" for item in items)
+
+
+def test_legend_item_extraction_matches_same_gray_linestyle_curve_count(tmp_path):
+    manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "same_gray_linestyle_legend_items",
+        SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True, legend_inside=True),
+    )
+    image = load_bgr(manifest["image_path"])
+    plot_area = _truth_plot_area(manifest["truth_axes_path"])
+    detector = LegendDetector()
+    legends = detector.detect_from_image(image, plot_area)
+    items = detector.extract_items(image, legends)
+
+    assert len(items) == 6
+
+
+def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
+    cases = {
+        "marker_curves": SyntheticConfig(seed=21, n_curves=4, marker_curves=True),
+        "same_color_marker_curves": SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True),
+        "same_gray_linestyle_curves": SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True),
+        "dense_legend_curves": SyntheticConfig(seed=24, n_curves=10, dense_legend_curves=True),
+    }
+
+    for name, config in cases.items():
+        manifest = generate_benchmark(str(tmp_path / "synthetic"), name, config)
+        root = Path(manifest["image_path"]).parent
+        with open(manifest["truth_curves_path"], "r", encoding="utf-8") as f:
+            curves = json.load(f)["curves"]
+
+        assert Path(manifest["image_path"]).is_file()
+        assert len(curves) == manifest["curve_count"]
+        assert all((root / curve["mask_path"]).is_file() for curve in curves)
+        assert all(cv2.countNonZero(cv2.imread(str(root / curve["mask_path"]), cv2.IMREAD_GRAYSCALE)) > 0 for curve in curves)
+
+        if name == "marker_curves":
+            assert all(curve["linestyle"] == "None" for curve in curves)
+            assert len({curve["marker"] for curve in curves}) == len(curves)
+        if name == "same_color_marker_curves":
+            assert len({curve["color"] for curve in curves}) == 1
+            assert len({curve["marker"] for curve in curves}) == len(curves)
+        if name == "same_gray_linestyle_curves":
+            assert all(_is_gray_hex(curve["color"]) for curve in curves)
+            assert len({str(curve["linestyle"]) for curve in curves}) >= 4
+        if name == "dense_legend_curves":
+            assert manifest["curve_count"] >= 10
+            assert manifest["synthetic_config"]["legend_inside"]
+            assert all(curve["marker"] for curve in curves)
+
+
 def test_image_legend_detection_finds_framed_lower_right_legend(tmp_path):
     manifest = generate_benchmark(
         str(tmp_path / "synthetic"),
@@ -340,6 +478,14 @@ def _truth_plot_area(path: str) -> PlotArea:
         truth = json.load(f)
     bbox = truth["plot_area"]
     return PlotArea(BoundingBox(bbox["x_min"], bbox["y_min"], bbox["x_max"], bbox["y_max"]))
+
+
+def _is_gray_hex(value: str) -> bool:
+    value = value.strip().lstrip("#")
+    r = int(value[0:2], 16)
+    g = int(value[2:4], 16)
+    b = int(value[4:6], 16)
+    return r == g == b
 
 
 def _segment(start, end, start_tangent, end_tangent):
@@ -434,3 +580,282 @@ def test_synthetic_benchmark_suite_metrics_stay_within_thresholds(tmp_path):
     assert detected["mean_data_r2_at_pred_x"] > 0.99
     assert detected_delta["mean_hausdorff_distance_px"] > 100.0
     assert detected_delta["mean_data_y_rmse"] > 0.10
+
+
+def test_pipeline_debug_artifacts_include_legend_items_overlay(tmp_path):
+    artifact_dir = tmp_path / "artifacts"
+    result = GraphExtractionPipeline(
+        PipelineConfig(
+            run_paths=True,
+            artifact_dir=str(artifact_dir),
+            write_debug_artifacts=True,
+        )
+    ).run(str(ROOT / "tests" / "test1.png"))
+
+    debug = result.artifacts.get("debug", {})
+    assert Path(debug["overview"]).is_file()
+    assert Path(debug["legend_items"]).is_file()
+    assert isinstance(result.legend_items, list)
+
+
+def test_pipeline_debug_artifacts_include_component_classification_overlay(tmp_path):
+    artifact_dir = tmp_path / "artifacts_components"
+    result = GraphExtractionPipeline(
+        PipelineConfig(
+            run_paths=True,
+            artifact_dir=str(artifact_dir),
+            write_debug_artifacts=True,
+        )
+    ).run(str(ROOT / "tests" / "test1.png"))
+
+    debug = result.artifacts.get("debug", {})
+    assert Path(debug["component_classification"]).is_file()
+    assert len(result.line_components) > 0
+
+    with open(result.artifacts["quality_report"], "r", encoding="utf-8") as f:
+        quality_report = json.load(f)
+    assert quality_report["counts"]["line_component_count"] == len(result.line_components)
+    assert "component_summary" in quality_report
+
+
+def test_pipeline_debug_artifacts_include_marker_candidates_overlay(tmp_path):
+    artifact_dir = tmp_path / "artifacts_markers"
+    result = GraphExtractionPipeline(
+        PipelineConfig(
+            run_paths=True,
+            artifact_dir=str(artifact_dir),
+            write_debug_artifacts=True,
+        )
+    ).run(str(ROOT / "tests" / "test1.png"))
+
+    debug = result.artifacts.get("debug", {})
+    assert Path(debug["marker_candidates"]).is_file()
+    assert Path(debug["marker_curve_instances"]).is_file()
+    assert isinstance(result.marker_candidates, list)
+    assert isinstance(result.marker_curve_instances, list)
+
+    with open(result.artifacts["quality_report"], "r", encoding="utf-8") as f:
+        quality_report = json.load(f)
+    assert quality_report["counts"]["marker_candidate_count"] == len(result.marker_candidates)
+    assert quality_report["counts"]["marker_curve_instance_count"] == len(result.marker_curve_instances)
+    assert "marker_summary" in quality_report
+    assert "marker_instance_summary" in quality_report
+
+
+def test_marker_curve_instances_group_candidates_by_local_rank():
+    mask = np.zeros((120, 240), dtype=np.uint8)
+    for x in (40, 90, 140, 190):
+        for y in (30, 60, 90):
+            cv2.circle(mask, (x, y), 7, 255, -1)
+
+    extractor = LinePathExtractor(PathTracingConfig())
+    markers = extractor.detect_marker_candidates_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+    instances = group_marker_curve_instances(markers, group_count=3)
+
+    assert len(instances) == 3
+    assert all(instance.marker_count == 4 for instance in instances)
+    assert {instance.grouping_method for instance in instances} == {"x_rank"}
+
+
+def test_pipeline_quality_report_includes_prototype_binding_scores(tmp_path):
+    artifact_dir = tmp_path / "artifacts_bindings"
+    result = GraphExtractionPipeline(
+        PipelineConfig(
+            run_paths=True,
+            artifact_dir=str(artifact_dir),
+            write_debug_artifacts=True,
+        )
+    ).run(str(ROOT / "tests" / "test1.png"))
+
+    assert result.curve_visual_prototypes
+    assert result.prototype_bindings
+    assert all(0.0 <= binding.score <= 1.0 for binding in result.prototype_bindings)
+
+    with open(result.artifacts["quality_report"], "r", encoding="utf-8") as f:
+        quality_report = json.load(f)
+    assert quality_report["counts"]["prototype_binding_count"] == len(result.prototype_bindings)
+    assert quality_report["binding_summary"]["binding_count"] == len(result.prototype_bindings)
+    assert quality_report["binding_summary"]["best_by_prototype"]
+
+
+def test_pipeline_outputs_prototype_bound_marker_paths(tmp_path):
+    prototype = CurveVisualPrototype(
+        prototype_id="legend_proto_00",
+        legend_item_id="legend_00_item_00",
+        confidence=0.9,
+    )
+    instance = MarkerCurveInstance(
+        instance_id="marker_instance_00",
+        source_curve_id="curve_color_0",
+        marker_ids=["m0", "m1", "m2"],
+        points=[Point(30, 50), Point(10, 70), Point(20, 60)],
+        marker_count=3,
+        confidence=0.8,
+    )
+    binding = PrototypeBinding(
+        binding_id="binding_0000",
+        prototype_id=prototype.prototype_id,
+        legend_item_id=prototype.legend_item_id,
+        target_curve_id=instance.instance_id,
+        target_type="marker_instance",
+        score=0.95,
+        confidence=0.85,
+    )
+
+    paths = _prototype_bound_marker_paths([prototype], [binding], [instance])
+
+    assert len(paths) == 1
+    path = paths[0]
+    assert path.curve_id == "legend_proto_00_bound_path"
+    assert [(point.x, point.y) for point in path.pixel_points_ordered] == [(10, 70), (20, 60), (30, 50)]
+    assert path.observed_pixel_count == 3
+    assert path.confidence == pytest.approx(0.8)
+    assert "prototype_bound_marker_path" in path.warnings
+
+
+def test_pipeline_maps_prototype_bound_marker_paths_to_data(tmp_path):
+    prototype = CurveVisualPrototype(
+        prototype_id="legend_proto_00",
+        legend_item_id="legend_00_item_00",
+        confidence=0.9,
+    )
+    instance = MarkerCurveInstance(
+        instance_id="marker_instance_00",
+        source_curve_id="curve_color_0",
+        marker_ids=["m0", "m1", "m2"],
+        points=[Point(10, 220), Point(60, 120), Point(110, 20)],
+        marker_count=3,
+        confidence=0.8,
+    )
+    binding = PrototypeBinding(
+        binding_id="binding_0000",
+        prototype_id=prototype.prototype_id,
+        legend_item_id=prototype.legend_item_id,
+        target_curve_id=instance.instance_id,
+        target_type="marker_instance",
+        score=0.95,
+        confidence=0.85,
+    )
+    bound_paths = _prototype_bound_marker_paths([prototype], [binding], [instance])
+    plot_area = PlotArea(BoundingBox(10.0, 20.0, 110.0, 220.0))
+    data_range = DataRange(0.0, 10.0, -1.0, 1.0)
+
+    series_list = map_curve_paths_to_data(bound_paths, plot_area, data_range)
+    csv_path = tmp_path / "prototype_bound_curves.csv"
+    write_data_series_csv(str(csv_path), series_list)
+
+    assert len(series_list) == 1
+    assert series_list[0].curve_id == "legend_proto_00_bound_path"
+    assert series_list[0].point_count == 3
+    assert series_list[0].points[0].x == 0.0
+    assert series_list[0].points[0].y == -1.0
+    assert csv_path.is_file()
+
+
+def test_prototype_bound_line_style_paths_use_component_centers():
+    prototype = CurveVisualPrototype(
+        prototype_id="legend_proto_01",
+        legend_item_id="legend_00_item_01",
+        line_style="dashed",
+        confidence=0.9,
+    )
+    instance = LineStyleCurveInstance(
+        instance_id="line_style_instance_00",
+        source_curve_id="curve_color_0",
+        component_ids=["c0", "c1", "c2"],
+        points=[Point(50, 120), Point(10, 140), Point(30, 130)],
+        component_count=3,
+        estimated_line_style="dashed",
+        confidence=0.75,
+    )
+    binding = PrototypeBinding(
+        binding_id="binding_0001",
+        prototype_id=prototype.prototype_id,
+        legend_item_id=prototype.legend_item_id,
+        target_curve_id=instance.instance_id,
+        target_type="line_style_instance",
+        score=0.92,
+        confidence=0.82,
+    )
+
+    paths = _prototype_bound_line_style_paths([prototype], [binding], [instance])
+
+    assert len(paths) == 1
+    path = paths[0]
+    assert path.curve_id == "legend_proto_01_bound_path"
+    assert (path.pixel_points_ordered[0].x, path.pixel_points_ordered[0].y) == (10, 140)
+    assert (path.pixel_points_ordered[-1].x, path.pixel_points_ordered[-1].y) == (50, 120)
+    assert len(path.pixel_points_ordered) > 3
+    assert path.completed_ranges
+    assert path.completed_pixel_count > 0
+    assert min(path.confidence_per_point) < path.confidence
+    assert path.component_count == 3
+    assert path.confidence == pytest.approx(0.75)
+    assert "prototype_bound_line_style_path" in path.warnings
+
+
+def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
+    manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "same_color_marker_binding",
+        SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True, legend_inside=True),
+    )
+
+    result = run_prototype_binding_benchmark(str(Path(manifest["image_path"]).parent))
+    summary = result["summary"]
+
+    assert summary["mode"] == "prototype_binding"
+    assert summary["legend_count"] >= 1
+    assert summary["legend_item_count"] == summary["curve_count"]
+    assert summary["curve_visual_prototype_count"] == summary["curve_count"]
+    assert summary["binding_count"] >= summary["curve_visual_prototype_count"]
+    assert summary["evaluated_prototype_count"] >= 1
+    assert summary["binding_accuracy"] is not None
+    assert 0.0 <= summary["binding_accuracy"] <= 1.0
+    assert summary["truth_marker_count"] > 0
+    assert summary["marker_candidate_recall"] is not None
+    assert 0.0 <= summary["marker_candidate_recall"] <= 1.0
+    assert summary["marker_group_count"] >= 1
+    assert summary["marker_group_assignment_accuracy"] is not None
+    assert 0.0 <= summary["marker_group_assignment_accuracy"] <= 1.0
+    assert result["marker_metrics"]["truth_marker_count"] == summary["truth_marker_count"]
+    assert result["marker_group_metrics"]["marker_group_count"] == summary["marker_group_count"]
+    assert result["marker_group_metrics"]["grouping_method"] in {"x_rank", "y_kmeans"}
+    assert result["prototypes"]
+    assert summary["binding_accuracy"] >= 0.75
+    assert any(row["best_target_type"] == "marker_instance" for row in result["prototypes"])
+    assert summary["prototype_bound_path_count"] >= summary["curve_count"]
+    assert summary["valid_prototype_bound_path_count"] >= summary["curve_count"]
+    assert summary["valid_prototype_bound_data_count"] >= summary["curve_count"]
+    assert summary["mean_prototype_bound_data_y_rmse"] is not None
+    assert summary["mean_prototype_bound_data_y_rmse"] < 0.05
+    assert summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
+    assert summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.75
+    assert result["pipeline"]["prototype_bound_paths"]
+
+    gray_manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "same_gray_linestyle_binding",
+        SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True, legend_inside=True),
+    )
+    gray_result = run_prototype_binding_benchmark(str(Path(gray_manifest["image_path"]).parent))
+    gray_summary = gray_result["summary"]
+    assert gray_summary["legend_item_count"] == gray_summary["curve_count"]
+    assert gray_summary["curve_visual_prototype_count"] == gray_summary["curve_count"]
+    assert gray_summary["marker_curve_instance_count"] == 0
+    assert gray_summary["line_style_curve_instance_count"] == gray_summary["curve_count"]
+    assert gray_summary["prototype_bound_path_count"] == gray_summary["curve_count"]
+    assert gray_summary["valid_prototype_bound_path_count"] == gray_summary["curve_count"]
+    assert gray_summary["mean_prototype_bound_data_y_rmse"] is not None
+    assert gray_summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
+    assert gray_summary["mean_prototype_bound_data_y_rmse"] < 0.45
+    assert gray_summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.75
+    assert gray_summary["mean_prototype_bound_completed_point_ratio"] is not None
+    assert gray_summary["mean_prototype_bound_completed_point_ratio"] > 0.0
+    assert gray_result["pipeline"]["prototype_bound_paths"]
+    assert {
+        instance["grouping_method"]
+        for instance in gray_result["pipeline"]["line_style_curve_instances"]
+    } == {"component_x_rank"}
+    assert gray_summary["binding_accuracy"] >= 0.75
+    assert all(row["best_target_type"] == "line_style_instance" for row in gray_result["prototypes"] if row["expected_curve_id"] is not None)

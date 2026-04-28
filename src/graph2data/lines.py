@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from .image_io import load_bgr, write_json
-from .models import CurvePath, Point
+from .models import BoundingBox, CurvePath, LineComponentClassification, MarkerCandidate, Point
 
 Pixel = Tuple[int, int]  # (x, y)
 
@@ -29,6 +29,12 @@ class PathTracingConfig:
     marker_like_max_aspect_ratio: float = 1.8
     marker_like_min_line_pixels: int = 40
     marker_like_min_line_span_px: int = 35
+    marker_candidate_min_area: int = 12
+    marker_candidate_max_span_px: int = 36
+    marker_candidate_max_aspect_ratio: float = 2.0
+    marker_candidate_core_radius_px: float = 2.8
+    marker_candidate_crop_padding_px: int = 7
+    marker_candidate_dedup_distance_px: float = 8.0
     enable_gap_linking: bool = True
     max_gap_px: float = 45.0
     max_gap_angle_deg: float = 60.0
@@ -136,6 +142,41 @@ class LinePathExtractor:
         _, binary = cv2.threshold(gray, self.config.threshold, 255, cv2.THRESH_BINARY)
         return binary
 
+    def classify_components_from_mask_image(
+        self,
+        image_bgr: np.ndarray,
+        curve_id: str = "curve",
+    ) -> List[LineComponentClassification]:
+        binary = self._to_binary(image_bgr)
+        skeleton = self._skeletonize(binary)
+        pixels = _skeleton_pixels(skeleton)
+        if not pixels:
+            return []
+
+        components = _connected_components(pixels)
+        components = [c for c in components if len(c) >= self.config.min_component_pixels]
+        if self.config.prune_spurs:
+            components = [
+                _prune_short_spurs(c, self.config.max_spur_length_px)
+                for c in components
+            ]
+            components = [c for c in components if len(c) >= self.config.min_component_pixels]
+
+        classifications = [
+            _classify_line_component(component, curve_id, idx, self.config)
+            for idx, component in enumerate(components)
+        ]
+        classifications.sort(key=lambda item: (item.bbox.x_min, item.bbox.y_min, item.component_id))
+        return classifications
+
+    def detect_marker_candidates_from_mask_image(
+        self,
+        image_bgr: np.ndarray,
+        curve_id: str = "curve",
+    ) -> List[MarkerCandidate]:
+        binary = self._to_binary(image_bgr)
+        return _detect_marker_candidates(binary, curve_id, self.config)
+
     def _skeletonize(self, binary: np.ndarray) -> np.ndarray:
         mask = (binary > 0).astype(np.uint8)
         try:
@@ -203,6 +244,235 @@ def _filter_marker_like_components(
     return kept, skipped
 
 
+def _classify_line_component(
+    component: Set[Pixel],
+    curve_id: str,
+    component_index: int,
+    config: PathTracingConfig,
+) -> LineComponentClassification:
+    descriptor = _component_descriptor(component)
+    graph = _build_graph(component)
+    degrees = [len(neighbors) for neighbors in graph.values()]
+    endpoint_count = sum(1 for degree in degrees if degree == 1)
+    junction_count = sum(1 for degree in degrees if degree >= 3)
+    endpoints = [node for node, neighbors in graph.items() if len(neighbors) == 1]
+    path = _trace_main_path(graph, endpoints)
+    path_length = _path_length(path)
+
+    compact = (
+        descriptor["width"] <= config.marker_like_max_span_px
+        and descriptor["height"] <= config.marker_like_max_span_px
+        and descriptor["aspect_ratio"] <= config.marker_like_max_aspect_ratio
+    )
+    line_anchor = (
+        descriptor["pixel_count"] >= config.marker_like_min_line_pixels
+        or descriptor["max_span"] >= config.marker_like_min_line_span_px
+        or (descriptor["aspect_ratio"] > config.marker_like_max_aspect_ratio and descriptor["max_span"] >= 8)
+    )
+
+    warnings = []
+    if descriptor["pixel_count"] <= 2:
+        class_label = "noise"
+        confidence = 0.70
+    elif line_anchor:
+        class_label = "line_like"
+        confidence = min(1.0, 0.55 + descriptor["max_span"] / max(config.marker_like_min_line_span_px * 2.0, 1.0))
+    elif compact:
+        class_label = "marker_like"
+        confidence = min(1.0, 0.55 + descriptor["pixel_count"] / max(config.marker_like_min_line_pixels, 1.0))
+    else:
+        class_label = "noise"
+        confidence = 0.45
+        warnings.append("ambiguous_component")
+
+    bbox = BoundingBox(
+        descriptor["x_min"],
+        descriptor["y_min"],
+        descriptor["x_max"],
+        descriptor["y_max"],
+    )
+    return LineComponentClassification(
+        curve_id=curve_id,
+        component_id=f"{curve_id}_component_{component_index:04d}",
+        class_label=class_label,
+        bbox=bbox,
+        pixel_count=int(descriptor["pixel_count"]),
+        width=float(descriptor["width"]),
+        height=float(descriptor["height"]),
+        max_span=float(descriptor["max_span"]),
+        aspect_ratio=float(descriptor["aspect_ratio"]),
+        path_points=[Point(float(x), float(y)) for x, y in path] if class_label == "line_like" else [],
+        endpoint_count=int(endpoint_count),
+        junction_count=int(junction_count),
+        path_length_px=float(path_length),
+        confidence=float(confidence),
+        warnings=warnings,
+    )
+
+
+def _detect_marker_candidates(
+    binary_mask: np.ndarray,
+    curve_id: str,
+    config: PathTracingConfig,
+) -> List[MarkerCandidate]:
+    mask = (binary_mask > 0).astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    candidates: List[MarkerCandidate] = []
+    for idx in range(1, num):
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        x = int(stats[idx, cv2.CC_STAT_LEFT])
+        y = int(stats[idx, cv2.CC_STAT_TOP])
+        width = int(stats[idx, cv2.CC_STAT_WIDTH])
+        height = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        if area < config.marker_candidate_min_area:
+            continue
+        if max(width, height) > config.marker_candidate_max_span_px:
+            continue
+        aspect_ratio = max(width, height) / max(1.0, float(min(width, height)))
+        if aspect_ratio > config.marker_candidate_max_aspect_ratio:
+            continue
+
+        component_mask = (labels[y : y + height, x : x + width] == idx).astype(np.uint8)
+        box_area = max(1, width * height)
+        fill_ratio = float(area) / float(box_area)
+        area_ratio = float(area) / float(max(width, height) ** 2)
+        contour_info = _component_contour_metrics(component_mask)
+        shape = _classify_marker_shape(fill_ratio, contour_info["circularity"], aspect_ratio)
+        confidence = _marker_candidate_confidence(fill_ratio, contour_info["circularity"], aspect_ratio)
+
+        candidates.append(
+            MarkerCandidate(
+                curve_id=curve_id,
+                marker_id=f"{curve_id}_marker_{len(candidates):04d}",
+                center=Point(float(x + width / 2.0), float(y + height / 2.0)),
+                bbox=BoundingBox(float(x), float(y), float(x + width), float(y + height)),
+                pixel_count=area,
+                width=float(width),
+                height=float(height),
+                area_ratio=float(area_ratio),
+                fill_ratio=float(fill_ratio),
+                aspect_ratio=float(aspect_ratio),
+                circularity=float(contour_info["circularity"]),
+                shape=shape,
+                confidence=float(confidence),
+                warnings=[] if shape != "unknown" else ["uncertain_shape"],
+            )
+        )
+    candidates.extend(_distance_transform_marker_candidates(mask, curve_id, config, candidates))
+    return candidates
+
+
+def _distance_transform_marker_candidates(
+    mask: np.ndarray,
+    curve_id: str,
+    config: PathTracingConfig,
+    existing: Sequence[MarkerCandidate],
+) -> List[MarkerCandidate]:
+    if not np.any(mask):
+        return []
+    dist = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    core = (dist >= float(config.marker_candidate_core_radius_px)).astype(np.uint8)
+    num, labels, stats, centroids = cv2.connectedComponentsWithStats(core, connectivity=8)
+    candidates: List[MarkerCandidate] = []
+    h, w = mask.shape[:2]
+    for idx in range(1, num):
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        cx, cy = centroids[idx]
+        component = labels == idx
+        max_radius = float(dist[component].max()) if np.any(component) else 0.0
+        radius = max(float(config.marker_candidate_core_radius_px), max_radius) + float(config.marker_candidate_crop_padding_px)
+        x0 = max(0, int(round(cx - radius)))
+        y0 = max(0, int(round(cy - radius)))
+        x1 = min(w, int(round(cx + radius + 1)))
+        y1 = min(h, int(round(cy + radius + 1)))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        crop = mask[y0:y1, x0:x1]
+        pixel_count = int(np.count_nonzero(crop))
+        width = x1 - x0
+        height = y1 - y0
+        if pixel_count < config.marker_candidate_min_area:
+            continue
+        if max(width, height) > config.marker_candidate_max_span_px:
+            continue
+        aspect_ratio = max(width, height) / max(1.0, float(min(width, height)))
+        if aspect_ratio > config.marker_candidate_max_aspect_ratio:
+            continue
+        if _near_existing_marker(cx, cy, existing, candidates, config.marker_candidate_dedup_distance_px):
+            continue
+
+        fill_ratio = float(pixel_count) / float(max(1, width * height))
+        area_ratio = float(pixel_count) / float(max(width, height) ** 2)
+        contour_info = _component_contour_metrics(crop.astype(np.uint8))
+        shape = _classify_marker_shape(fill_ratio, contour_info["circularity"], aspect_ratio)
+        confidence = _marker_candidate_confidence(fill_ratio, contour_info["circularity"], aspect_ratio)
+        warnings = [] if shape != "unknown" else ["uncertain_shape"]
+        warnings.append("distance_transform_candidate")
+        candidates.append(
+            MarkerCandidate(
+                curve_id=curve_id,
+                marker_id=f"{curve_id}_marker_dt_{len(candidates):04d}",
+                center=Point(float(cx), float(cy)),
+                bbox=BoundingBox(float(x0), float(y0), float(x1), float(y1)),
+                pixel_count=pixel_count,
+                width=float(width),
+                height=float(height),
+                area_ratio=float(area_ratio),
+                fill_ratio=float(fill_ratio),
+                aspect_ratio=float(aspect_ratio),
+                circularity=float(contour_info["circularity"]),
+                shape=shape,
+                confidence=float(confidence),
+                warnings=warnings,
+            )
+        )
+    return candidates
+
+
+def _near_existing_marker(
+    x: float,
+    y: float,
+    existing: Sequence[MarkerCandidate],
+    new_candidates: Sequence[MarkerCandidate],
+    threshold_px: float,
+) -> bool:
+    for marker in list(existing) + list(new_candidates):
+        if math.hypot(float(marker.center.x) - x, float(marker.center.y) - y) <= threshold_px:
+            return True
+    return False
+
+
+def _component_contour_metrics(component_mask: np.ndarray) -> Dict[str, float]:
+    contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {"circularity": 0.0}
+    contour = max(contours, key=cv2.contourArea)
+    area = float(cv2.contourArea(contour))
+    perimeter = float(cv2.arcLength(contour, closed=True))
+    if perimeter <= 0 or area <= 0:
+        return {"circularity": 0.0}
+    circularity = float(4.0 * math.pi * area / (perimeter * perimeter))
+    return {"circularity": circularity}
+
+
+def _classify_marker_shape(fill_ratio: float, circularity: float, aspect_ratio: float) -> str:
+    if aspect_ratio <= 1.18 and fill_ratio >= 0.82:
+        return "square_like"
+    if aspect_ratio <= 1.25 and circularity >= 0.72:
+        return "circle_like"
+    if fill_ratio <= 0.45:
+        return "cross_like"
+    return "unknown"
+
+
+def _marker_candidate_confidence(fill_ratio: float, circularity: float, aspect_ratio: float) -> float:
+    symmetry = max(0.0, 1.0 - abs(aspect_ratio - 1.0))
+    score = 0.25 + 0.35 * min(1.0, fill_ratio) + 0.25 * min(1.0, circularity) + 0.15 * symmetry
+    return max(0.0, min(1.0, score))
+
+
 def _component_descriptor(component: Set[Pixel]) -> Dict[str, float]:
     xs = [p[0] for p in component]
     ys = [p[1] for p in component]
@@ -212,6 +482,10 @@ def _component_descriptor(component: Set[Pixel]) -> Dict[str, float]:
     min_span = max(1, min(width, height))
     return {
         "pixel_count": float(len(component)),
+        "x_min": float(min(xs)),
+        "y_min": float(min(ys)),
+        "x_max": float(max(xs) + 1),
+        "y_max": float(max(ys) + 1),
         "width": float(width),
         "height": float(height),
         "max_span": float(max_span),

@@ -22,6 +22,19 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 骨架化与路径追踪：将 mask 转为中心线 skeleton，再生成有序像素路径。
 - 断裂补全记录：对虚线/点线等多连通片段执行基础 gap linking，并保存补全区间和点级置信度。
 - 图例污染回归测试：支持绘图区内图例合成场景，能量化排除图例前后的误差变化。
+- 图例 item 诊断解析：已能把检测到的 legend bbox 分块为若干 item，提取样本区域、文本区域、样本颜色和粗略线型，并输出 `debug/legend_items.png`。
+- 图例 item 行数修正：synthetic 图例底部残留行已在 row 分块阶段过滤；`same_color_marker_curves` 的 legend item 数现与 4 条 truth 曲线对齐，`same_gray_linestyle_curves` 的 legend item 数现与 6 条 truth 曲线对齐。
+- 同灰线型重大修正：`line_style_instance` 当前已加入局部 x-neighborhood rank 分组、组件级 skeleton 主路径拼接和实例内 y 离群组件裁剪；prototype-bound path 的 RMSE / coverage 已进入稳定区间。
+- 同灰线型连续化节点：prototype-bound line-style path 当前会用方向、y 跳变和局部切线约束筛选可连接的 dash/dot gap，执行低置信度 gap interpolation；补全点写入 `completed_ranges` 并以较低点级置信度导出，debug overlay 会用不同颜色显示低置信度补全段。
+- 下一阶段 synthetic 场景：已支持 `marker_curves`、`same_color_marker_curves`、`same_gray_linestyle_curves`、`dense_legend_curves` 生成，用于后续 marker/线型分离和图例绑定实验。
+- 组件分类诊断：已能把每条 mask 的 skeleton 连通组件分类为 `line_like`、`marker_like` 或 `noise`，输出结构化 `line_components`、质量报告 `component_summary` 和 `debug/component_classification.png`。
+- Marker 候选诊断：已能从原始 mask 连通组件中提取 marker 候选中心点、bbox、填充率、圆度和粗略形状，输出结构化 `marker_candidates`、质量报告 `marker_summary` 和 `debug/marker_candidates.png`。
+- 线+marker 局部分离：marker 候选检测已加入距离变换局部 blob 检测，可从与线条相连的 marker 中恢复候选中心点；`same_color_marker_curves` 的 marker candidate recall 已从 0 提升到约 0.94。
+- 同色 marker 分组诊断：prototype-binding benchmark 已加入局部 x-neighborhood rank 分组，可把同色 marker 候选按轨迹分成多组；`same_color_marker_curves` 的 marker group assignment accuracy 当前约 1.0。
+- Marker 曲线实例输出：pipeline 已输出诊断级 `marker_curve_instances`，并生成 `debug/marker_curve_instances.png`；当前实例基于 marker 中心分组，并可为成功绑定到 marker 实例的图例 prototype 生成 `prototype_bound_paths`；已加入保守过滤，避免 `same_gray_linestyle_curves` 中的虚线/点线碎片被当成 marker 实例抢走绑定。
+- 同灰线型实例诊断：已能把 `line_like` 组件按垂直轨迹分组为诊断级 `line_style_curve_instances`，并输出 `debug/line_style_curve_instances.png`；在 `same_gray_linestyle_curves` 中当前可作为图例顺序约束的实例级绑定目标，并可生成 prototype-bound path/data。
+- Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
+- Prototype-bound path/data 输出：当最佳绑定目标是 `marker_instance` 或 `line_style_instance` 时，pipeline 会按 marker 中心点或线段组件中心点生成 `prototype_bound_paths`，并输出 `debug/prototype_bound_paths.png`；开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`。
 - 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
 
 当前固定 suite 的参考结果：
@@ -149,7 +162,14 @@ Get-Content temp\legend_detected_exclude.json
 temp/suite_stage_demo/results/suite_summary.json
 temp/stage_demo_pipeline.json
 temp/stage_demo_artifacts/data/curves.csv
+temp/stage_demo_artifacts/data/prototype_bound_curves.csv
 temp/stage_demo_artifacts/debug/overview.png
+temp/stage_demo_artifacts/debug/legend_items.png
+temp/stage_demo_artifacts/debug/component_classification.png
+temp/stage_demo_artifacts/debug/marker_candidates.png
+temp/stage_demo_artifacts/debug/marker_curve_instances.png
+temp/stage_demo_artifacts/debug/line_style_curve_instances.png
+temp/stage_demo_artifacts/debug/prototype_bound_paths.png
 temp/stage_demo_artifacts/debug/paths_overlay.png
 temp/stage_demo_artifacts/debug/paths/*.png
 temp/stage_demo_artifacts/masks/*.png
@@ -172,33 +192,43 @@ temp/stage_demo_artifacts/quality/report.json
 优先级最高的工作主线：
 
 1. 图例样本解析
-   - 在 `legend.py` 中把已检测到的 legend bbox 继续分解为若干 legend item。
-   - 对每个 item 提取样本线段、marker、颜色/灰度、线型和邻近文本。
-   - 新增结构化模型，例如 `LegendItem` 或 `CurveVisualPrototype`，用于描述一条曲线的视觉身份。
-   - 输出 debug artifact：`debug/legend_items.png`，能看到每个图例 item 的 bbox、样本线段和文本区域。
+   - 已在 `legend.py` 中加入诊断级 legend item 分块，可把已检测到的 legend bbox 分解为若干 legend item。
+   - 已对每个 item 提取样本区域、文本区域、颜色/灰度和粗略线型；marker 形状和 OCR 标签文本仍待增强。
+   - 已新增 `LegendItem` 和 `CurveVisualPrototype` 结构，用于描述一条曲线的视觉身份。
+   - 已输出 debug artifact：`debug/legend_items.png`，能看到每个图例 item 的 bbox、样本区域和文本区域。
 
 2. Marker 与线型分离
-   - 在 `lines.py` 或独立模块中把 skeleton 组件分成 line-like、marker-like、text-like/noise 三类。
-   - 当前 `--line_filter_marker_like` 只是实验开关，下一阶段要把它升级为可解释分类器，而不是简单删除紧凑组件。
+   - 已在 `lines.py` 中把 skeleton 组件分成 `line_like`、`marker_like`、`noise` 三类，并接入 pipeline 结构化输出。
+   - 当前 `--line_filter_marker_like` 仍只是实验开关；新增组件分类默认只做诊断，不默认删除任何组件。
+   - 已从原始 mask 组件中提取 marker 中心点和形状特征，不只依赖 skeleton 几何。
+   - 已加入距离变换局部 blob 检测，能处理 marker 与线条连成同一组件的场景。
+   - 当前 marker 候选仍是诊断级结果，尚未用于拆分同色曲线或重写 path。
    - 对 marker 曲线保留 marker 中心点，同时对连续线段保留 centerline，避免 marker 既污染路径又丢失曲线身份。
-   - 增加 synthetic case：纯 marker、线+marker、同色不同 marker、虚线密度变化。
+   - 已增加 synthetic case 生成开关：纯 marker、同色不同 marker、同灰不同线型、密集图例；后续继续补线+marker 联合评测和虚线密度变化指标。
 
 3. 图例到绘图区的实例绑定
-   - 将图例中提取到的颜色、灰度、线型、marker 特征用于约束绘图区 mask。
+   - 已将图例中提取到的颜色、灰度、粗线型、粗 marker 风格用于生成诊断级 binding score。
+   - 下一步将 binding score 用于约束绘图区 mask/path，而不是只输出诊断报告。
    - 对彩色图继续使用颜色作为强特征；对灰度图增加线型、marker、局部方向和组件周期作为补充特征。
-   - 建立绑定评分：颜色/灰度相似度、线宽、marker 形状、dash 周期、路径连续性。
-   - 输出每条曲线的绑定置信度和 warnings，避免在歧义场景下静默给出错误结果。
+   - 已建立第一版绑定评分：颜色/灰度相似度、line-like 存在性、marker 候选相似度。
+   - 已输出每条 prototype 到曲线结果的绑定分数、置信度和 warnings，避免在歧义场景下静默给出错误结果。
 
 4. Benchmark 扩展与质量门
    - 在 `synthetic.py` 中新增下一阶段固定场景：
-     - `marker_curves`
-     - `same_color_marker_curves`
-     - `same_gray_linestyle_curves`
-     - `dense_legend_curves`
-   - 在 `benchmark.py` 中增加 legend item / prototype 绑定指标：
+     - `marker_curves`          已可生成
+     - `same_color_marker_curves` 已可生成
+     - `same_gray_linestyle_curves` 已可生成
+     - `dense_legend_curves`    已可生成
+   - 在 `benchmark.py` 中已增加诊断级 legend item / prototype 绑定指标：
      - 图例 item 检出数量
-     - 曲线标签绑定准确率
-     - marker 中心点召回率
+     - `binding_count`
+     - `binding_accuracy`
+     - `mean_best_score`
+     - `truth_marker_count`
+     - `marker_candidate_recall`
+     - `marker_candidate_precision`
+     - `marker_group_assignment_accuracy`
+   - 后续继续补：
      - 同色/同灰曲线实例分离准确率
    - pytest 中新增小而稳定的单元测试，先覆盖图例 item 分解和 marker/line 组件分类。
 
@@ -213,14 +243,65 @@ temp/stage_demo_artifacts/quality/report.json
 建议实现顺序：
 
 ```text
-1. 新增 LegendItem / CurveVisualPrototype 数据结构。
-2. 实现 legend bbox 内 item 分块和样本线段/文本区域提取。
-3. 为 legend item 输出 debug overlay 和 JSON。
-4. 扩展 synthetic：生成 marker 曲线和同色/同灰曲线。
-5. 实现 marker-like / line-like 组件分类，不默认删除任何组件。
-6. 用 legend prototype 约束 mask/path 提取，先在 synthetic 上验收。
-7. 再回到 tests/test1.png 做真实图 A/B 诊断。
+1. 已新增 LegendItem / CurveVisualPrototype 数据结构。
+2. 已实现 legend bbox 内 item 分块和样本区域/文本区域提取。
+3. 已为 legend item 输出 debug overlay 和 JSON。
+4. 下一步扩展 synthetic：生成 marker 曲线和同色/同灰曲线。
+5. 已实现 marker-like / line-like / noise skeleton 组件分类，不默认删除任何组件。
+6. 已提取 marker 中心点与形状特征，并已输出 legend prototype 到 marker_curve_instances 的绑定诊断；下一步用 binding score 约束 mask/path 提取，先在 synthetic 上验收。
+7. 最后回到 tests/test1.png 做真实图 A/B 诊断。
 ```
+
+当前可直接运行的 prototype binding 诊断命令：
+
+```powershell
+$env:PYTHONPATH='src'
+
+pixi run python -m graph2data.synthetic --out temp\binding_benchmark --name same_color_marker_curves --same_color_marker_curves --legend_inside --curves 4
+pixi run python -m graph2data.benchmark --case temp\binding_benchmark\same_color_marker_curves --mode prototype-binding --out temp\binding_benchmark\same_color_marker_binding.json
+
+pixi run python -m graph2data.synthetic --out temp\binding_benchmark --name same_gray_linestyle_curves --same_gray_linestyle_curves --legend_inside --curves 6
+pixi run python -m graph2data.benchmark --case temp\binding_benchmark\same_gray_linestyle_curves --mode prototype-binding --out temp\binding_benchmark\same_gray_binding.json
+```
+
+当前 `same_color_marker_curves` 诊断参考：
+
+```text
+truth_marker_count ≈ 72
+marker_candidate_count ≈ 68
+marker_candidate_recall ≈ 0.94
+marker_candidate_precision ≈ 1.0
+marker_group_assignment_accuracy ≈ 1.0
+legend_item_count = curve_count = 4
+prototype binding 已优先绑定到 marker_curve_instances
+prototype_bound_path_count ≈ 4
+mean_prototype_bound_data_y_rmse ≈ 0.008
+mean_prototype_bound_data_x_coverage_ratio ≈ 0.90
+prototype_bound_data_series_count ≈ 4  # 需要 --map_data 和坐标范围
+binding_accuracy ≈ 1.0
+```
+
+当前 `same_gray_linestyle_curves` 诊断参考：
+
+```text
+marker_curve_instance_count = 0
+line_style_curve_instance_count >= curve_count
+prototype binding 已优先绑定到 line_style_curve_instances
+prototype_bound_path_count >= curve_count
+prototype_bound_data_series_count >= curve_count  # 需要 --map_data 和坐标范围
+当前 line-style instance 分组已优先使用局部 x-neighborhood rank，再回退到 y 聚类
+line-like 组件当前已保存局部 skeleton 主路径，prototype-bound path 优先拼接真实组件路径点
+legend_item_count = curve_count = 6
+实例内当前会裁剪极端 y 离群组件，减少边框/残留片段污染
+相邻 dash/dot 片段当前会执行低置信度 gap interpolation，补全点保存在 completed_ranges
+mean_prototype_bound_data_y_rmse 当前约 0.24 - 0.28
+mean_prototype_bound_data_x_coverage_ratio 当前约 0.87 - 0.93
+mean_prototype_bound_completed_point_ratio 有结构化输出
+prototype_bound_path_summary.completed_point_ratio 有结构化输出
+binding_accuracy ≈ 1.0
+```
+
+说明：`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间；gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
 
 下一阶段验收标准：
 
@@ -339,7 +420,7 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 
 当前下一步工程任务：
 
-1. 优先推进 `legend.py`：从“图例区域排除”升级为“图例 item 分块 + 样本线段/marker/文本提取 + 标签绑定”。
+1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，下一步补强 marker 形状、OCR 文本和标签绑定。
 2. 扩展 `synthetic.py`：增加 marker 曲线、同色不同 marker、同灰不同线型、密集图例等下一阶段固定场景。
 3. 增强 `lines.py`：把当前实验性 marker-like 过滤升级为 marker-like / line-like 组件分类，并输出分类 artifact。
 4. 在 `pipeline.py` 中增加 legend item overlay、component classification overlay、prototype binding report。

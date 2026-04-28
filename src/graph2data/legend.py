@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from .models import BoundingBox, LegendDetection, OCRTextBox, PlotArea
+from .models import BoundingBox, CurveVisualPrototype, LegendDetection, LegendItem, OCRTextBox, PlotArea
 
 
 @dataclass
@@ -36,6 +36,16 @@ class LegendDetectorConfig:
     image_unframed_min_density: float = 0.015
     image_unframed_max_area_ratio: float = 0.14
     image_unframed_max_width_ratio: float = 0.36
+    item_gray_threshold: int = 245
+    item_min_foreground_pixels: int = 12
+    item_min_row_foreground_px: int = 8
+    item_min_height_px: int = 6
+    item_max_height_px: int = 40
+    item_row_gap_px: int = 7
+    item_min_width_px: int = 26
+    item_sample_max_width_px: int = 70
+    item_sample_default_width_px: int = 46
+    item_text_gap_px: int = 7
 
 
 class LegendDetector:
@@ -142,6 +152,53 @@ class LegendDetector:
             )
         return detections
 
+    def extract_items(self, image_bgr: np.ndarray, legends: List[LegendDetection]) -> List[LegendItem]:
+        """Split detected legend boxes into visual sample rows.
+
+        The output is intentionally diagnostic: it records where each legend
+        item appears and which pixels look like its sample line/marker. Later
+        stages can bind these prototypes to plot-area curves.
+        """
+        items: List[LegendItem] = []
+        for legend_index, legend in enumerate(legends):
+            crop, offset = self._legend_crop(image_bgr, legend.bbox)
+            if crop.size == 0:
+                continue
+            rows = self._legend_item_rows(crop)
+            for row_index, row in enumerate(rows):
+                item = self._legend_item_from_row(
+                    image_bgr=image_bgr,
+                    crop=crop,
+                    offset=offset,
+                    legend_index=legend_index,
+                    row_index=row_index,
+                    row=row,
+                )
+                if item is not None:
+                    items.append(item)
+        return items
+
+    def visual_prototypes_from_items(self, items: List[LegendItem]) -> List[CurveVisualPrototype]:
+        prototypes: List[CurveVisualPrototype] = []
+        for item in items:
+            if item.rgb is None or item.lab is None or item.sample_bbox is None:
+                continue
+            prototypes.append(
+                CurveVisualPrototype(
+                    prototype_id=f"legend_proto_{len(prototypes):02d}",
+                    legend_item_id=item.item_id,
+                    rgb=item.rgb,
+                    lab=item.lab,
+                    sample_bbox=item.sample_bbox,
+                    label=item.label,
+                    line_style=item.line_style,
+                    marker_style=item.marker_style,
+                    confidence=item.confidence,
+                    source="legend_item",
+                )
+            )
+        return prototypes
+
     def _detect_unframed_upper_right_legend(self, gray: np.ndarray, offset, plot_bbox: BoundingBox):
         """Detect compact unframed legend clusters in the upper-right plot corner."""
         h, w = gray.shape[:2]
@@ -194,6 +251,144 @@ class LegendDetector:
             score = min(1.0, 0.45 + 0.30 * min(1.0, dark_pixels / 900.0) + 0.25 * min(1.0, width / 180.0))
             candidates.append((score, bbox))
         return candidates
+
+    def _legend_crop(self, image_bgr: np.ndarray, bbox: BoundingBox):
+        h, w = image_bgr.shape[:2]
+        x0 = max(0, int(round(bbox.x_min)))
+        y0 = max(0, int(round(bbox.y_min)))
+        x1 = min(w, int(round(bbox.x_max)))
+        y1 = min(h, int(round(bbox.y_max)))
+        return image_bgr[y0:y1, x0:x1].copy(), (x0, y0)
+
+    def _legend_item_rows(self, crop: np.ndarray) -> List[Tuple[int, int]]:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        foreground = (gray < self.config.item_gray_threshold).astype(np.uint8)
+        foreground = _remove_frame_like_border(foreground)
+        if not np.any(foreground):
+            return []
+
+        row_counts = np.count_nonzero(foreground, axis=1)
+        active_rows = np.where(row_counts >= self.config.item_min_row_foreground_px)[0]
+        if active_rows.size == 0:
+            return []
+
+        raw_bands: List[Tuple[int, int]] = []
+        start = int(active_rows[0])
+        prev = int(active_rows[0])
+        for row in active_rows[1:]:
+            row = int(row)
+            if row - prev <= self.config.item_row_gap_px:
+                prev = row
+                continue
+            raw_bands.append((start, prev + 1))
+            start = row
+            prev = row
+        raw_bands.append((start, prev + 1))
+
+        rows = []
+        h, _ = foreground.shape[:2]
+        for y0, y1 in raw_bands:
+            y0 = max(0, y0 - 2)
+            y1 = min(h, y1 + 3)
+            band = foreground[y0:y1, :]
+            xs = np.where(np.any(band > 0, axis=0))[0]
+            if xs.size == 0:
+                continue
+            width = int(xs.max() - xs.min() + 1)
+            height = int(y1 - y0)
+            pixels = int(np.count_nonzero(band))
+            if pixels < self.config.item_min_foreground_pixels:
+                continue
+            if width < self.config.item_min_width_px:
+                continue
+            if height < self.config.item_min_height_px or height > self.config.item_max_height_px:
+                continue
+            rows.append((y0, y1, pixels))
+        return [(y0, y1) for y0, y1, _ in _filter_legend_item_row_artifacts(rows)]
+
+    def _legend_item_from_row(
+        self,
+        image_bgr: np.ndarray,
+        crop: np.ndarray,
+        offset,
+        legend_index: int,
+        row_index: int,
+        row: Tuple[int, int],
+    ) -> Optional[LegendItem]:
+        y0, y1 = row
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        foreground = (gray < self.config.item_gray_threshold).astype(np.uint8)
+        foreground = _remove_frame_like_border(foreground)
+        band = foreground[y0:y1, :]
+        ys, xs = np.where(band > 0)
+        if xs.size == 0:
+            return None
+
+        x_min = int(xs.min())
+        x_max = int(xs.max()) + 1
+        split_x = self._sample_text_split_x(band, x_min, x_max)
+        sample_x0 = x_min
+        sample_x1 = min(x_max, split_x)
+        if sample_x1 - sample_x0 < 8:
+            sample_x1 = min(x_max, sample_x0 + self.config.item_sample_default_width_px)
+        sample_x1 = min(sample_x1, sample_x0 + self.config.item_sample_max_width_px)
+        text_x0 = min(x_max, max(sample_x1 + self.config.item_text_gap_px, split_x + 1))
+
+        item_bbox = _bbox_from_local(x_min, y0, x_max, y1, offset, pad=2.0)
+        sample_bbox = _bbox_from_local(sample_x0, y0, sample_x1, y1, offset, pad=2.0)
+        text_bbox = None
+        if x_max > text_x0:
+            text_bbox = _bbox_from_local(text_x0, y0, x_max, y1, offset, pad=2.0)
+
+        rgb, lab, sample_pixels = _sample_color_and_lab(image_bgr, sample_bbox, threshold=self.config.item_gray_threshold)
+        warnings = []
+        if sample_pixels < self.config.item_min_foreground_pixels:
+            warnings.append("low_sample_foreground")
+        sample_mask = foreground[y0:y1, sample_x0:sample_x1]
+        line_style = _classify_sample_line_style(sample_mask)
+        marker_style = _classify_sample_marker_style(sample_mask)
+        confidence = min(1.0, 0.35 + sample_pixels / 80.0)
+        if text_bbox is None:
+            warnings.append("text_region_not_found")
+            confidence = min(confidence, 0.65)
+
+        return LegendItem(
+            item_id=f"legend_{legend_index:02d}_item_{row_index:02d}",
+            legend_index=legend_index,
+            bbox=item_bbox,
+            sample_bbox=sample_bbox,
+            text_bbox=text_bbox,
+            rgb=rgb,
+            lab=lab,
+            foreground_pixel_count=int(sample_pixels),
+            line_style=line_style,
+            marker_style=marker_style,
+            confidence=float(confidence),
+            source="image_heuristic",
+            warnings=warnings,
+        )
+
+    def _sample_text_split_x(self, row_mask: np.ndarray, x_min: int, x_max: int) -> int:
+        col_active = np.any(row_mask > 0, axis=0)
+        active = np.where(col_active)[0]
+        if active.size <= 1:
+            return min(x_max, x_min + self.config.item_sample_default_width_px)
+        gaps = []
+        for left, right in zip(active[:-1], active[1:]):
+            gap = int(right - left - 1)
+            if gap >= self.config.item_text_gap_px:
+                gaps.append((gap, int(left), int(right)))
+        min_sample_end = x_min + 12
+        max_sample_end = min(x_max, x_min + self.config.item_sample_max_width_px)
+        candidates = [
+            (gap, left, right)
+            for gap, left, right in gaps
+            if min_sample_end <= left <= max_sample_end
+        ]
+        if candidates:
+            _, left, _ = max(candidates, key=lambda item: item[0])
+            return int(left + 1)
+        return min(x_max, x_min + self.config.item_sample_default_width_px)
 
     def _cluster_by_rows(self, indexed_texts):
         rows = sorted(indexed_texts, key=lambda item: item[1].center.y)
@@ -332,3 +527,121 @@ def _extend_component_down(dark: np.ndarray, x: int, y: int, width: int, height:
             if gap > 28:
                 break
     return max(height, last - y)
+
+
+def _remove_frame_like_border(mask: np.ndarray) -> np.ndarray:
+    """Drop obvious legend frame pixels while keeping inner item strokes."""
+    out = mask.copy()
+    h, w = out.shape[:2]
+    if h < 8 or w < 8:
+        return out
+    t = min(4, max(1, min(h, w) // 20))
+    for row in range(t):
+        if np.count_nonzero(out[row, :]) > 0.45 * w:
+            out[row, :] = 0
+    for row in range(max(0, h - t), h):
+        if np.count_nonzero(out[row, :]) > 0.45 * w:
+            out[row, :] = 0
+    for col in range(t):
+        if np.count_nonzero(out[:, col]) > 0.45 * h:
+            out[:, col] = 0
+    for col in range(max(0, w - t), w):
+        if np.count_nonzero(out[:, col]) > 0.45 * h:
+            out[:, col] = 0
+    return out
+
+
+def _filter_legend_item_row_artifacts(rows: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    filtered: List[Tuple[int, int, int]] = []
+    for row in rows:
+        y0, y1, pixels = row
+        height = y1 - y0
+        if filtered:
+            prev_y0, prev_y1, prev_pixels = filtered[-1]
+            near_previous = y0 <= prev_y1 + 4
+            short_tail = height <= 12 and y0 >= prev_y0
+            if near_previous and short_tail:
+                continue
+        filtered.append(row)
+    return filtered
+
+
+def _bbox_from_local(x0: int, y0: int, x1: int, y1: int, offset, pad: float = 0.0) -> BoundingBox:
+    x_off, y_off = offset
+    return BoundingBox(
+        float(x_off + x0) - pad,
+        float(y_off + y0) - pad,
+        float(x_off + x1) + pad,
+        float(y_off + y1) + pad,
+    )
+
+
+def _sample_color_and_lab(image_bgr: np.ndarray, bbox: BoundingBox, threshold: int):
+    h, w = image_bgr.shape[:2]
+    x0 = max(0, int(round(bbox.x_min)))
+    y0 = max(0, int(round(bbox.y_min)))
+    x1 = min(w, int(round(bbox.x_max)))
+    y1 = min(h, int(round(bbox.y_max)))
+    if x1 <= x0 or y1 <= y0:
+        return None, None, 0
+    crop = image_bgr[y0:y1, x0:x1]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    foreground = gray < threshold
+    pixel_count = int(np.count_nonzero(foreground))
+    if pixel_count <= 0:
+        return None, None, 0
+    mean_bgr = crop[foreground].mean(axis=0)
+    lab_pix = cv2.cvtColor(np.uint8([[mean_bgr]]), cv2.COLOR_BGR2Lab)[0][0]
+    rgb = (int(round(mean_bgr[2])), int(round(mean_bgr[1])), int(round(mean_bgr[0])))
+    lab = (float(lab_pix[0]), float(lab_pix[1]), float(lab_pix[2]))
+    return rgb, lab, pixel_count
+
+
+def _classify_sample_line_style(sample_mask: np.ndarray) -> str:
+    if sample_mask.size == 0 or not np.any(sample_mask):
+        return "unknown"
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    cleaned = cv2.morphologyEx(sample_mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    if not np.any(cleaned):
+        cleaned = sample_mask.astype(np.uint8)
+    num, _, stats, _ = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
+    spans = []
+    compact = 0
+    for idx in range(1, num):
+        width = int(stats[idx, cv2.CC_STAT_WIDTH])
+        height = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        if area < 2:
+            continue
+        spans.append(width)
+        if max(width, height) <= 8:
+            compact += 1
+    if not spans:
+        return "unknown"
+    if len(spans) <= 2 and max(spans) >= 18:
+        return "solid"
+    if compact >= 4:
+        return "dotted"
+    if len(spans) >= 3:
+        return "dashed"
+    return "unknown"
+
+
+def _classify_sample_marker_style(sample_mask: np.ndarray) -> str:
+    if sample_mask.size == 0 or not np.any(sample_mask):
+        return "unknown"
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(sample_mask.astype(np.uint8), connectivity=8)
+    compact_components = 0
+    for idx in range(1, num):
+        width = int(stats[idx, cv2.CC_STAT_WIDTH])
+        height = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        if area < 3:
+            continue
+        if max(width, height) <= 14 and abs(width - height) <= 5:
+            compact_components += 1
+    if compact_components >= 2:
+        return "repeated_compact"
+    if compact_components == 1:
+        return "single_compact"
+    return "unknown"
