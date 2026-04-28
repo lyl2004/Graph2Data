@@ -9,24 +9,69 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 
 后续工作的核心方向是逐步补完本地图像提取链路，使其最终替代网站工具导出的中间 CSV，同时保留 CSV 校正模块作为统一后处理和质量控制内核。
 
+## 当前阶段快照
+
+当前项目已经从 `tests/` 下的松散实验脚本，推进到 `src/graph2data/` 下的第一版结构化图像提取包。现阶段重点不是 GUI 完整化，而是先把“图像 -> 曲线 mask -> 有序路径 -> 质量评估”的核心链路做成可复现、可量化、可持续迭代的工程基线。
+
+已经形成闭环的能力：
+
+- 合成 benchmark 生成：输出图像、坐标轴真值、曲线真值数据、每条曲线真值 mask。
+- 颜色原型提取：支持彩色曲线、黑色曲线、灰色曲线和基础抗锯齿容差。
+- 曲线 mask 生成：根据曲线颜色原型生成单曲线二值 mask，并支持图例区域排除。
+- 骨架化与路径追踪：将 mask 转为中心线 skeleton，再生成有序像素路径。
+- 断裂补全记录：对虚线/点线等多连通片段执行基础 gap linking，并保存补全区间和点级置信度。
+- 图例污染回归测试：支持绘图区内图例合成场景，能量化排除图例前后的误差变化。
+- 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
+
+当前固定 suite 的参考结果：
+
+```text
+basic_curves:
+  mean_chamfer_distance_px ≈ 0.83
+  mean_mask_tolerant_f1    ≈ 0.89
+
+achromatic_curves:
+  mean_chamfer_distance_px ≈ 0.87
+  mean_mask_tolerant_f1    ≈ 0.89
+
+legend_inside_curves，不排除图例:
+  mean_chamfer_distance_px ≈ 5.13
+  mean_hausdorff_distance_px ≈ 252.40
+
+legend_inside_curves，排除合成图例区域:
+  mean_chamfer_distance_px ≈ 0.83
+  mean_hausdorff_distance_px ≈ 6.40
+```
+
+阶段判断：
+
+```text
+已完成：第一版纯图形学分辨基线和 benchmark 闭环。
+正在推进：真实图例检测、mask/debug artifact、坐标轴和 OCR 结果的稳定融合。
+尚未完成：刻度 OCR 语义解析、完整图例解析、复杂交叉/重叠曲线归属、像素路径到最终数据 CSV 的正式映射出口。
+```
+
 ## 当前项目结构
 
 ```text
 Graph2Data/
-  assets/              静态资源、字体和样式文件
+  assets/              CSV GUI 静态资源、字体和样式文件
+  benchmarks/          合成 benchmark 输出目录，生成结果默认不纳入版本控制
   src/
-    csv_gui.py         NiceGUI 可视化入口
+    csv_gui.py         CSV 校正工具 NiceGUI 可视化入口
     csv_processor.py   CSV 坐标映射、清洗、拟合核心逻辑
-    csv_create.py      合成测试图与理论曲线校验工具
-    config.json        当前参数配置草稿
+    csv_create.py      早期合成测试图与理论曲线校验工具
+    config.json        CSV 校正参数配置草稿
     tempreadme         CSV 校正模块设计记录
+    graph2data/        当前重点推进的正式图像提取包
   tests/
-    test_pre.py        坐标轴检测原型
-    test_ocr.py        OCR 文本识别原型
-    test_colors.py     曲线颜色提取原型
-    test_lines.py      曲线线条提取与补全原型
-    test_worker.py     图像分析组合工作流原型
-    test_draw.py       合成测试图生成工具
+    test_pre.py        早期坐标轴检测原型
+    test_ocr.py        早期 OCR 文本识别原型
+    test_colors.py     早期曲线颜色提取原型
+    test_lines.py      早期曲线线条提取与补全原型
+    test_worker.py     早期图像分析组合工作流原型
+    test_draw.py       早期合成测试图生成工具
+  temp/                本地临时输出、debug artifact 和 benchmark 运行结果
   pixi.toml            Pixi 环境配置
   pixi.lock            锁定依赖版本
 ```
@@ -72,6 +117,14 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 ```
 
 当前新 pipeline 的目标不是一次性替代所有 `tests/` 原型，而是先建立稳定的数据接口和 JSON 输出。后续会逐步把 `tests/test_pre.py`、`test_ocr.py`、`test_colors.py`、`test_lines.py` 中成熟的算法迁移进正式模块。
+
+当前下一步工程任务：
+
+1. 在 `pipeline.py` 中输出更多可视化 debug artifact，包括坐标轴候选、plot area、legend bbox、颜色 prototype、预测 mask 和 skeleton overlay。
+2. 将 `legend.py` 从“只根据 OCR 文本簇排除污染区域”升级为“图例区域检测 + 图例样本提取 + 标签绑定”的两阶段结构。
+3. 扩展 `synthetic.py` 的场景覆盖：虚线密度变化、marker 曲线、轻度交叉、局部遮挡、同色不同线型、log 坐标轴。
+4. 增强 `lines.py` 的片段连接代价函数，从当前距离/角度规则升级为距离、切线、曲率、线型周期和交叉惩罚的组合评分。
+5. 建立 `mapping.py`，把 `CurvePath` 的像素点正式映射到数据空间，并复用 `csv_processor.py` 的清洗、拟合和导出能力。
 
 生成一个带真值数据的合成 benchmark：
 
@@ -679,7 +732,7 @@ log 坐标轴
 坐标轴：像素误差、绘图区 IoU
 OCR：刻度识别准确率、数值解析准确率
 颜色/图例：curve prototype 匹配率
-mask：IoU、Precision、Recall、F1
+mask：IoU、Precision、Recall、F1、2px tolerant Precision/Recall/F1
 path：Chamfer distance、Hausdorff distance
 数据：RMSE、MAE、Max Error、R2
 ```
