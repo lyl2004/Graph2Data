@@ -330,9 +330,11 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
     marker_metrics = _evaluate_marker_candidate_recall(marker_candidates, truth_marker_centers)
     marker_curve_instances = []
     if should_group_marker_curve_instances(marker_candidates, line_components):
+        line_like_count = sum(1 for component in line_components if component.class_label == "line_like")
         marker_curve_instances = group_marker_curve_instances(
             marker_candidates,
             group_count=len([curve for curve in truth_curves if curve.get("marker")]) or None,
+            prefer_trajectory=line_like_count > len(visual_prototypes) > 1,
         )
     line_style_curve_instances = []
     if not marker_curve_instances and should_group_line_style_curve_instances(line_components, len(visual_prototypes)):

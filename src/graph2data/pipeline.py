@@ -126,9 +126,11 @@ class GraphExtractionPipeline:
                 line_components = filter_border_line_components(line_components, axis.plot_area.bbox)
 
             if should_group_marker_curve_instances(marker_candidates, line_components):
+                line_like_count = sum(1 for component in line_components if component.class_label == "line_like")
                 marker_curve_instances = group_marker_curve_instances(
                     marker_candidates,
                     group_count=len(curve_visual_prototypes) if curve_visual_prototypes else None,
+                    prefer_trajectory=line_like_count > (len(curve_visual_prototypes) if curve_visual_prototypes else 0) > 1,
                 )
             if not marker_curve_instances and should_group_line_style_curve_instances(line_components, len(curve_visual_prototypes)):
                 line_style_curve_instances = group_line_style_curve_instances(
@@ -1158,6 +1160,9 @@ def _score_prototype_bindings(
             warnings = []
             if proto.marker_style == "unknown":
                 warnings.append("prototype_marker_unknown")
+            if len(curves) >= len(visual_prototypes) and "mixed_source_curve_ids" in getattr(instance, "warnings", []):
+                score *= 0.82
+                warnings.append("mixed_source_marker_instance_penalty")
             bindings.append(
                 PrototypeBinding(
                     binding_id=f"binding_{len(bindings):04d}",

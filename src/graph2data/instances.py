@@ -26,12 +26,17 @@ def group_marker_curve_instances(
     marker_candidates: Sequence[MarkerCandidate],
     group_count: int | None = None,
     x_tolerance_px: float = 14.0,
+    prefer_trajectory: bool = False,
 ) -> List[MarkerCurveInstance]:
     if not marker_candidates:
         return []
     candidates = list(marker_candidates)
     count = group_count or _infer_group_count(candidates)
-    groups = cluster_markers_by_x_rank(candidates, count, x_tolerance_px=x_tolerance_px)
+    groups = (
+        cluster_markers_by_trajectory(candidates, count)
+        if prefer_trajectory
+        else cluster_markers_by_x_rank(candidates, count, x_tolerance_px=x_tolerance_px)
+    )
     if not groups["centers"]:
         groups = cluster_markers_by_y(candidates, count)
     instances: List[MarkerCurveInstance] = []
@@ -332,6 +337,114 @@ def cluster_markers_by_x_rank(marker_candidates: Sequence[MarkerCandidate], grou
         else:
             centers.append(0.0)
     return {"centers": centers, "assignments": assignments, "members": members, "method": "x_rank"}
+
+
+def cluster_markers_by_trajectory(
+    marker_candidates: Sequence[MarkerCandidate],
+    group_count: int,
+    min_inliers: int = 6,
+    inlier_residual_px: float = 10.0,
+    assign_residual_px: float = 22.0,
+) -> Dict:
+    """Cluster marker candidates by approximately linear curve trajectories.
+
+    Vertical rank works for separated marker curves, but it swaps identities
+    when curves cross. This deterministic RANSAC-like pass is reserved for
+    scenes where the caller has already detected line fragmentation that
+    suggests crossings.
+    """
+    k = min(group_count, len(marker_candidates))
+    if k <= 0:
+        return {"centers": [], "assignments": {}, "members": {}, "method": "trajectory_ransac"}
+    markers = list(marker_candidates)
+    points = [(float(marker.center.x), float(marker.center.y), idx) for idx, marker in enumerate(markers)]
+    x_values = [point[0] for point in points]
+    x_span = max(x_values) - min(x_values) if x_values else 0.0
+    if x_span <= 1.0:
+        return {"centers": [], "assignments": {}, "members": {}, "method": "trajectory_ransac"}
+
+    min_pair_span = max(80.0, x_span * 0.30)
+    candidate_lines = []
+    for left_idx, left in enumerate(points):
+        for right in points[left_idx + 1 :]:
+            if abs(right[0] - left[0]) < min_pair_span:
+                continue
+            line = _line_from_points(left, right)
+            if line is None:
+                continue
+            inliers = [
+                idx
+                for x_val, y_val, idx in points
+                if _line_residual_px(line, x_val, y_val) <= inlier_residual_px
+            ]
+            if len(inliers) >= min_inliers:
+                candidate_lines.append((len(inliers), line, inliers))
+    candidate_lines.sort(key=lambda item: item[0], reverse=True)
+
+    selected_lines = []
+    covered = set()
+    for _, line, inliers in candidate_lines:
+        new_inliers = [idx for idx in inliers if idx not in covered]
+        if len(new_inliers) < min_inliers:
+            continue
+        selected_lines.append(line)
+        covered.update(new_inliers)
+        if len(selected_lines) >= k:
+            break
+    if len(selected_lines) < k:
+        return {"centers": [], "assignments": {}, "members": {}, "method": "trajectory_ransac"}
+
+    for _ in range(2):
+        provisional = {idx: [] for idx in range(k)}
+        for x_val, y_val, marker_idx in points:
+            best_group = min(range(k), key=lambda group_idx: _line_residual_px(selected_lines[group_idx], x_val, y_val))
+            if _line_residual_px(selected_lines[best_group], x_val, y_val) <= assign_residual_px:
+                provisional[best_group].append(marker_idx)
+        for group_idx, marker_indices in provisional.items():
+            if len(marker_indices) >= 2:
+                selected_lines[group_idx] = _fit_line_to_markers([markers[idx] for idx in marker_indices])
+
+    members = {idx: [] for idx in range(k)}
+    assignments: Dict[int, int] = {}
+    for x_val, y_val, marker_idx in points:
+        best_group = min(range(k), key=lambda group_idx: _line_residual_px(selected_lines[group_idx], x_val, y_val))
+        assignments[marker_idx] = best_group
+        members[best_group].append(marker_idx)
+
+    if any(not members[group_idx] for group_idx in range(k)):
+        return {"centers": [], "assignments": {}, "members": {}, "method": "trajectory_ransac"}
+    centers = [
+        sum(float(markers[idx].center.y) for idx in members[group_idx]) / len(members[group_idx])
+        for group_idx in range(k)
+    ]
+    return {"centers": centers, "assignments": assignments, "members": members, "method": "trajectory_ransac"}
+
+
+def _line_from_points(left, right):
+    dx = float(right[0]) - float(left[0])
+    if abs(dx) <= 1e-6:
+        return None
+    slope = (float(right[1]) - float(left[1])) / dx
+    intercept = float(left[1]) - slope * float(left[0])
+    return slope, intercept
+
+
+def _fit_line_to_markers(markers: Sequence[MarkerCandidate]):
+    xs = [float(marker.center.x) for marker in markers]
+    ys = [float(marker.center.y) for marker in markers]
+    x_mean = sum(xs) / len(xs)
+    y_mean = sum(ys) / len(ys)
+    denom = sum((x_val - x_mean) ** 2 for x_val in xs)
+    if denom <= 1e-9:
+        return 0.0, y_mean
+    slope = sum((x_val - x_mean) * (y_val - y_mean) for x_val, y_val in zip(xs, ys)) / denom
+    intercept = y_mean - slope * x_mean
+    return float(slope), float(intercept)
+
+
+def _line_residual_px(line, x_val: float, y_val: float) -> float:
+    slope, intercept = line
+    return abs(slope * float(x_val) + intercept - float(y_val)) / max((slope * slope + 1.0) ** 0.5, 1e-9)
 
 
 def _infer_group_count(marker_candidates: Sequence[MarkerCandidate]) -> int:

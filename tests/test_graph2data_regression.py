@@ -509,6 +509,12 @@ def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
         "line_marker_curves": SyntheticConfig(seed=25, n_curves=4, line_marker_curves=True),
         "crossing_line_marker_curves": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True),
         "same_color_line_marker_curves": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True),
+        "same_gray_line_marker_curves": SyntheticConfig(seed=28, n_curves=4, same_gray_line_marker_curves=True),
+        "crossing_same_gray_line_marker_curves": SyntheticConfig(
+            seed=29,
+            n_curves=4,
+            crossing_same_gray_line_marker_curves=True,
+        ),
         "same_color_marker_curves": SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True),
         "same_gray_linestyle_curves": SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True),
         "dense_legend_curves": SyntheticConfig(seed=24, n_curves=10, dense_legend_curves=True),
@@ -544,6 +550,21 @@ def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
             assert len({curve["color"] for curve in curves}) == 1
             assert manifest["synthetic_config"]["line_marker_curves"]
             assert manifest["synthetic_config"]["same_color_marker_curves"]
+        if name == "same_gray_line_marker_curves":
+            assert all(curve["linestyle"] == "-" for curve in curves)
+            assert all(curve["marker"] for curve in curves)
+            assert all(_is_gray_hex(curve["color"]) for curve in curves)
+            assert len({curve["color"] for curve in curves}) == len(curves)
+            assert manifest["synthetic_config"]["line_marker_curves"]
+            assert manifest["synthetic_config"]["same_gray_line_marker_curves"]
+        if name == "crossing_same_gray_line_marker_curves":
+            assert all(curve["linestyle"] == "-" for curve in curves)
+            assert all(curve["marker"] for curve in curves)
+            assert all(_is_gray_hex(curve["color"]) for curve in curves)
+            assert len({curve["color"] for curve in curves}) == len(curves)
+            assert manifest["synthetic_config"]["crossing_curves"]
+            assert manifest["synthetic_config"]["line_marker_curves"]
+            assert manifest["synthetic_config"]["same_gray_line_marker_curves"]
         if name == "same_color_marker_curves":
             assert len({curve["color"] for curve in curves}) == 1
             assert len({curve["marker"] for curve in curves}) == len(curves)
@@ -1041,6 +1062,13 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
     for name, config in {
         "crossing_line_marker_path": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True, legend_inside=False),
         "same_color_line_marker_path": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True, legend_inside=False),
+        "same_gray_line_marker_path": SyntheticConfig(seed=28, n_curves=4, same_gray_line_marker_curves=True, legend_inside=False),
+        "crossing_same_gray_line_marker_path": SyntheticConfig(
+            seed=29,
+            n_curves=4,
+            crossing_same_gray_line_marker_curves=True,
+            legend_inside=False,
+        ),
     }.items():
         manifest = generate_benchmark(str(tmp_path / "synthetic"), name, config)
         path_result = run_path_benchmark(str(Path(manifest["image_path"]).parent))
@@ -1084,6 +1112,7 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
     for name, config in {
         "crossing_line_marker_binding": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True, legend_inside=True),
         "same_color_line_marker_binding": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True, legend_inside=True),
+        "same_gray_line_marker_binding": SyntheticConfig(seed=28, n_curves=4, same_gray_line_marker_curves=True, legend_inside=True),
     }.items():
         manifest = generate_benchmark(str(tmp_path / "synthetic"), name, config)
         result = run_prototype_binding_benchmark(str(Path(manifest["image_path"]).parent))
