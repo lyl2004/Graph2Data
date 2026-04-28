@@ -85,6 +85,15 @@ class LayoutResult:
 
 
 @dataclass
+class LegendDetection:
+    bbox: BoundingBox
+    confidence: float = 0.0
+    text_indices: List[int] = field(default_factory=list)
+    source: str = "heuristic"
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CurvePrototype:
     curve_id: str
     rgb: Tuple[int, int, int]
@@ -132,6 +141,7 @@ class PipelineResult:
     axis: AxisDetection
     ocr: List[OCRTextBox] = field(default_factory=list)
     layout: Optional[LayoutResult] = None
+    legends: List[LegendDetection] = field(default_factory=list)
     curves: List[CurvePrototype] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 

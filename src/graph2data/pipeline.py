@@ -10,6 +10,7 @@ from .axes import AxisDetector, AxisDetectorConfig
 from .colors import CurveColorExtractor
 from .image_io import load_bgr, write_json
 from .layout import assign_text_to_regions, build_nine_grid
+from .legend import LegendDetector
 from .models import PipelineResult
 from .ocr import OCRDetector
 
@@ -38,6 +39,7 @@ class GraphExtractionPipeline:
         ocr_results = []
         layout = None
         curves = []
+        legends = []
 
         if self.config.run_ocr:
             try:
@@ -49,10 +51,15 @@ class GraphExtractionPipeline:
             layout = build_nine_grid(axis.image_size, axis.plot_area)
             if ocr_results:
                 layout = assign_text_to_regions(layout, ocr_results)
+                legends = LegendDetector().detect(ocr_results, axis.plot_area)
 
             if self.config.run_colors:
                 try:
-                    curves = CurveColorExtractor().extract(image, axis.plot_area.bbox)
+                    curves = CurveColorExtractor().extract(
+                        image,
+                        axis.plot_area.bbox,
+                        exclude_regions=[legend.bbox for legend in legends],
+                    )
                 except Exception as exc:
                     warnings.append(f"Color extraction failed: {exc}")
         else:
@@ -64,6 +71,7 @@ class GraphExtractionPipeline:
             axis=axis,
             ocr=ocr_results,
             layout=layout,
+            legends=legends,
             curves=curves,
             warnings=warnings,
         )

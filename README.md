@@ -46,6 +46,7 @@ models.py       统一数据结构
 image_io.py     图像和 JSON artifact I/O
 axes.py         坐标轴和绘图区检测
 layout.py       基于绘图区的九宫格划分和 OCR 归类
+legend.py       初版图例区域检测
 ocr.py          RapidOCR 包装
 colors.py       曲线颜色原型提取
 masks.py        根据颜色原型生成曲线 mask
@@ -127,6 +128,13 @@ $env:PYTHONPATH='src'
 pixi run python -m graph2data.benchmark --case benchmarks\synthetic\basic_curves --mode predicted-mask --mask_out temp\basic_predicted_masks --out temp\basic_pred_benchmark.json
 ```
 
+运行固定 benchmark suite：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.benchmark --suite --suite_out temp\suite_check
+```
+
 生成黑色/灰色曲线共存的基准图：
 
 ```powershell
@@ -175,6 +183,14 @@ achromatic_curves predicted-mask:
 - 对黑色/灰色等低色度曲线单独抽取 achromatic prototype。
 - 对灰色曲线 mask 扣除黑色像素的膨胀邻域，避免吃进黑线抗锯齿边缘。
 - 删除长而薄的网格/边框组件。
+
+图例污染处理已经开始：
+
+- `legend.py` 根据绘图区内 OCR 文本簇给出保守的 legend bbox 候选。
+- `pipeline.py` 在开启 OCR 和颜色提取时，会将检测到的 legend bbox 传给颜色提取模块作为排除区域。
+- `colors.py` 和 `masks.py` 均支持 `exclude_regions`，用于在颜色原型提取或 mask 生成时排除图例区域。
+
+该能力目前是启发式的前置版本，目标是先处理明显的绘图区内图例污染。完整图例解析，包括图例样本和曲线标签绑定，仍属于后续专题。
 
 ## 已成型流程：CSV 校正
 

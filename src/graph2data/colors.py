@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -39,7 +39,12 @@ class CurveColorExtractor:
     def __init__(self, config: Optional[ColorExtractorConfig] = None):
         self.config = config or ColorExtractorConfig()
 
-    def extract(self, image_bgr: np.ndarray, region: Optional[BoundingBox] = None) -> List[CurvePrototype]:
+    def extract(
+        self,
+        image_bgr: np.ndarray,
+        region: Optional[BoundingBox] = None,
+        exclude_regions: Optional[Sequence[BoundingBox]] = None,
+    ) -> List[CurvePrototype]:
         crop, offset = self._crop(image_bgr, region)
         if crop.size == 0:
             return []
@@ -55,6 +60,8 @@ class CurveColorExtractor:
         b_centered = lab_float[:, :, 2] - 128
         chroma = np.sqrt(a_centered**2 + b_centered**2)
         ignore = (l_channel < cfg.min_l) | (l_channel > cfg.max_l) | (chroma < cfg.min_chroma)
+        if exclude_regions:
+            self._apply_exclusions(ignore, exclude_regions, offset)
 
         visited = np.zeros((h, w), dtype=bool)
         visited[ignore] = True
@@ -108,6 +115,17 @@ class CurveColorExtractor:
         for mask in (dark, gray):
             regions.extend(self._regions_from_mask(mask.astype(np.uint8), lab))
         return regions
+
+    def _apply_exclusions(self, ignore: np.ndarray, exclude_regions: Sequence[BoundingBox], offset) -> None:
+        x_off, y_off = offset
+        h, w = ignore.shape[:2]
+        for bbox in exclude_regions:
+            x0 = max(0, int(bbox.x_min - x_off))
+            y0 = max(0, int(bbox.y_min - y_off))
+            x1 = min(w, int(bbox.x_max - x_off))
+            y1 = min(h, int(bbox.y_max - y_off))
+            if x1 > x0 and y1 > y0:
+                ignore[y0:y1, x0:x1] = True
 
     def _regions_from_mask(self, mask: np.ndarray, lab: np.ndarray):
         cfg = self.config

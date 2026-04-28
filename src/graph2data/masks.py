@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -39,6 +39,7 @@ class CurveMaskExtractor:
         image_bgr: np.ndarray,
         prototype: CurvePrototype,
         region: Optional[BoundingBox] = None,
+        exclude_regions: Optional[Sequence[BoundingBox]] = None,
     ) -> Tuple[np.ndarray, CurveMask]:
         crop, offset = _crop(image_bgr, region, self.config.inset_px)
         if crop.size == 0:
@@ -50,6 +51,8 @@ class CurveMaskExtractor:
         diff_l = np.abs(lab[:, :, 0] - target[0])
         diff_ab = np.sqrt((lab[:, :, 1] - target[1]) ** 2 + (lab[:, :, 2] - target[2]) ** 2)
         mask = ((diff_l <= self.config.range_l) & (diff_ab <= self.config.range_ab)).astype(np.uint8) * 255
+        if exclude_regions:
+            _apply_exclusions(mask, exclude_regions, offset)
         if self._is_gray_prototype(prototype):
             mask = self._suppress_dark_neighbors(mask, lab)
         mask = self._cleanup(mask)
@@ -139,6 +142,18 @@ def _mask_bbox(mask: np.ndarray) -> Optional[BoundingBox]:
     if len(xs) == 0:
         return None
     return BoundingBox(float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
+
+
+def _apply_exclusions(mask: np.ndarray, exclude_regions: Sequence[BoundingBox], offset) -> None:
+    x_off, y_off = offset
+    h, w = mask.shape[:2]
+    for bbox in exclude_regions:
+        x0 = max(0, int(bbox.x_min - x_off))
+        y0 = max(0, int(bbox.y_min - y_off))
+        x1 = min(w, int(bbox.x_max - x_off))
+        y1 = min(h, int(bbox.y_max - y_off))
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = 0
 
 
 def _crop(image_bgr: np.ndarray, region: Optional[BoundingBox], inset_px: int = 0):

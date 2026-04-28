@@ -11,12 +11,13 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 
 from .colors import ColorExtractorConfig, CurveColorExtractor
-from .image_io import load_bgr, write_json
+from .image_io import ensure_dir, load_bgr, write_json
 from .lines import LinePathExtractor
 from .masks import CurveMaskExtractor
 from .models import BoundingBox, CurvePrototype
 from .models import to_serializable
 from .quality import evaluate_curve_path
+from .synthetic import SyntheticConfig, generate_benchmark
 
 
 def run_path_benchmark(case_dir: str) -> Dict:
@@ -48,6 +49,46 @@ def run_path_benchmark(case_dir: str) -> Dict:
         "mean_completed_to_truth_px": _mean([m for m in valid if m.get("mean_completed_to_truth_px") is not None], "mean_completed_to_truth_px"),
     }
     return {"summary": summary, "curves": curve_metrics}
+
+
+def run_suite(output_root: str) -> Dict:
+    """Generate standard synthetic cases and run truth/predicted mask metrics."""
+    ensure_dir(output_root)
+    synthetic_root = os.path.join(output_root, "synthetic")
+    result_root = ensure_dir(os.path.join(output_root, "results"))
+
+    cases = [
+        ("basic_curves", SyntheticConfig(seed=42, n_curves=6, palette="basic")),
+        ("achromatic_curves", SyntheticConfig(seed=7, n_curves=6, palette="achromatic")),
+    ]
+
+    suite_cases = []
+    for name, config in cases:
+        manifest = generate_benchmark(synthetic_root, name=name, config=config)
+        case_dir = os.path.dirname(manifest["image_path"])
+
+        truth = run_path_benchmark(case_dir)
+        pred = run_predicted_mask_benchmark(case_dir, output_dir=os.path.join(result_root, f"{name}_predicted_masks"))
+
+        truth_path = os.path.join(result_root, f"{name}_truth_mask_metrics.json")
+        pred_path = os.path.join(result_root, f"{name}_predicted_mask_metrics.json")
+        write_json(truth_path, truth)
+        write_json(pred_path, pred)
+
+        suite_cases.append(
+            {
+                "name": name,
+                "case_dir": case_dir,
+                "truth_metrics": truth["summary"],
+                "predicted_metrics": pred["summary"],
+                "truth_metrics_path": truth_path,
+                "predicted_metrics_path": pred_path,
+            }
+        )
+
+    suite = {"output_root": output_root, "cases": suite_cases}
+    write_json(os.path.join(result_root, "suite_summary.json"), suite)
+    return suite
 
 
 def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None) -> Dict:
@@ -145,13 +186,19 @@ def _mean(rows: List[Dict], key: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Graph2Data synthetic benchmark metrics.")
-    parser.add_argument("--case", required=True, help="Synthetic case directory")
+    parser.add_argument("--case", default=None, help="Synthetic case directory")
     parser.add_argument("--mode", choices=["truth-mask", "predicted-mask"], default="truth-mask")
     parser.add_argument("--mask_out", default=None, help="Optional output directory for predicted masks")
+    parser.add_argument("--suite", action="store_true", help="Generate and run the standard benchmark suite")
+    parser.add_argument("--suite_out", default="benchmarks/suite", help="Suite output root")
     parser.add_argument("--out", default=None, help="Optional JSON output path")
     args = parser.parse_args()
 
-    if args.mode == "truth-mask":
+    if args.suite:
+        result = run_suite(args.suite_out)
+    elif not args.case:
+        raise ValueError("--case is required unless --suite is used")
+    elif args.mode == "truth-mask":
         result = run_path_benchmark(args.case)
     else:
         result = run_predicted_mask_benchmark(args.case, args.mask_out)
