@@ -367,12 +367,13 @@ rebuilt_path_count ≈ 1
 
 prototype-binding benchmark:
 binding_accuracy ≈ 1.0
+best_target_type 当前稳定为 curve
 prototype_bound_path_count = curve_count = 4
-mean_prototype_bound_data_y_rmse 当前约 0.42
+mean_prototype_bound_data_y_rmse 当前约 0.21
 mean_prototype_bound_data_x_coverage_ratio 当前约 0.99
 
-说明：该场景的 prototype 身份绑定已通过细灰阶 legend guidance、一对一 target 分配和 marker-instance 降权收口。
-当前主要剩余问题是部分 prototype 仍会回退到 line_style_instance 或细灰阶 direct path，数据 RMSE 尚明显高于普通 path。
+说明：该场景的 prototype 身份绑定已通过细灰阶 legend guidance、一对一 target 分配、guided-gray 低面积置信策略和 marker-instance 降权收口。
+当前主要剩余问题是细灰阶 direct path 的局部污染仍高于普通 truth-mask path，数据 RMSE 尚明显高于普通 path。
 ```
 
 当前 `same_color_marker_curves` 诊断参考：
@@ -412,7 +413,7 @@ prototype_bound_path_summary.completed_point_ratio 有结构化输出
 binding_accuracy ≈ 1.0
 ```
 
-说明：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已用于验证普通 path 质量门、prototype-bound 输出、标签传播和 CSV/data 一致性；`crossing_same_gray_line_marker_curves` 的 prototype binding 身份已收口，但 prototype-bound 数据误差仍需通过 marker 形状细分、跨交叉点轨迹保持或更可靠的 direct path mask 继续降低。通用 path 提取已能在低覆盖 junction 场景下触发平滑 skeleton x 投影重建。`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
+说明：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已用于验证普通 path 质量门、prototype-bound 输出、标签传播和 CSV/data 一致性；`crossing_same_gray_line_marker_curves` 的 prototype binding 身份已收口并稳定走 direct curve，但 prototype-bound 数据误差仍需通过更可靠的细灰阶 mask、局部污染过滤或跨交叉点轨迹保持继续降低。通用 path 提取已能在低覆盖 junction 场景下触发平滑 skeleton x 投影重建。`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
 
 下一阶段验收标准：
 
@@ -532,7 +533,7 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 当前下一步工程任务：
 
 1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，并已打通可选 OCR 标签传播；下一步补强复杂图例文本语义和 marker 形状细分。
-2. 继续扩展 prototype-bound 输出：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已验证 bound path、标签传播、data series 和 CSV 字段一致性；`crossing_same_gray_line_marker_curves` 的 prototype 身份绑定已收口，下一步重点压低该场景的 prototype-bound data RMSE，并继续覆盖更复杂遮挡场景。
+2. 继续扩展 prototype-bound 输出：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已验证 bound path、标签传播、data series 和 CSV 字段一致性；`crossing_same_gray_line_marker_curves` 已稳定为 direct curve 绑定，下一步继续把该场景 prototype-bound data RMSE 从约 0.21 压向普通 path 的 0.01 量级，并覆盖更复杂遮挡场景。
 3. 增强 `lines.py`：marker junction 导致的短路径重建现已前移到通用 path extraction，并加入平滑 x 投影中心线；下一步将该策略升级为更贴合局部曲率的路径拟合。
 4. 在 `pipeline.py` 中继续增加真实灰度图的诊断信息，重点解释同灰度曲线被合并或拆开的原因。
 5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。

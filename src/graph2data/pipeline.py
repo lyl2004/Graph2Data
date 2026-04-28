@@ -1142,8 +1142,17 @@ def _score_prototype_bindings(
                 score *= 0.75
                 warnings.append("achromatic_line_style_prototype_penalizes_direct_curve")
             if getattr(curve, "confidence", 1.0) < 0.8:
-                score *= max(0.25, float(curve.confidence))
-                warnings.append("low_curve_prototype_confidence")
+                if (
+                    getattr(curve, "source", "") == "guided_gray"
+                    and color_similarity is not None
+                    and color_similarity >= 0.85
+                    and proto.rgb is not None
+                    and _is_achromatic_rgb(proto.rgb)
+                ):
+                    warnings.append("guided_gray_low_area_confidence_not_penalized")
+                else:
+                    score *= max(0.25, float(curve.confidence))
+                    warnings.append("low_curve_prototype_confidence")
             if proto.marker_style == "unknown":
                 warnings.append("prototype_marker_unknown")
             bindings.append(

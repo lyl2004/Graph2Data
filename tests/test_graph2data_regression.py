@@ -1145,10 +1145,11 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
     assert crossing_gray_summary["valid_prototype_bound_path_count"] == crossing_gray_summary["curve_count"]
     assert crossing_gray_summary["valid_prototype_bound_data_count"] == crossing_gray_summary["curve_count"]
     assert crossing_gray_summary["mean_prototype_bound_data_y_rmse"] is not None
-    assert crossing_gray_summary["mean_prototype_bound_data_y_rmse"] < 0.45
+    assert crossing_gray_summary["mean_prototype_bound_data_y_rmse"] < 0.25
     assert crossing_gray_summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
     assert crossing_gray_summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.85
     assert all(row["success"] for row in crossing_gray_result["prototypes"] if row["expected_curve_id"] is not None)
+    assert all(row["best_target_type"] == "curve" for row in crossing_gray_result["prototypes"] if row["expected_curve_id"] is not None)
 
     manifest = generate_benchmark(
         str(tmp_path / "synthetic"),

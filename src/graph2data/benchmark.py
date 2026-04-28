@@ -562,13 +562,20 @@ def _match_prototype(hex_color: str, prototypes: List[CurvePrototype]) -> Option
 
 def _predicted_curve_to_truth_map(predicted_curves: List[CurvePrototype], truth_curves: List[Dict]) -> Dict[str, str]:
     mapping = {}
-    remaining_truth = list(truth_curves)
+    candidates = []
     for curve in predicted_curves:
-        if not remaining_truth:
+        for truth in truth_curves:
+            candidates.append((_rgb_distance(_hex_to_rgb(truth["color"]), curve.rgb), curve.curve_id, truth["curve_id"]))
+    used_curves = set()
+    used_truth = set()
+    for _, curve_id, truth_id in sorted(candidates):
+        if curve_id in used_curves or truth_id in used_truth:
+            continue
+        mapping[curve_id] = truth_id
+        used_curves.add(curve_id)
+        used_truth.add(truth_id)
+        if len(used_truth) >= len(truth_curves):
             break
-        best = min(remaining_truth, key=lambda truth: _rgb_distance(_hex_to_rgb(truth["color"]), curve.rgb))
-        mapping[curve.curve_id] = best["curve_id"]
-        remaining_truth.remove(best)
     return mapping
 
 
