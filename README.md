@@ -18,6 +18,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 合成 benchmark 生成：输出图像、坐标轴真值、曲线真值数据、每条曲线真值 mask。
 - 颜色原型提取：支持彩色曲线、黑色曲线、灰色曲线和基础抗锯齿容差。
 - 曲线 mask 生成：根据曲线颜色原型生成单曲线二值 mask，并支持图例区域排除。
+- Mask 清理：会过滤明显边框/网格残留，并保守移除紧贴边缘的极小刻度残片，避免破坏虚线和点线端点。
 - 骨架化与路径追踪：将 mask 转为中心线 skeleton，再生成有序像素路径。
 - 断裂补全记录：对虚线/点线等多连通片段执行基础 gap linking，并保存补全区间和点级置信度。
 - 图例污染回归测试：支持绘图区内图例合成场景，能量化排除图例前后的误差变化。
@@ -35,25 +36,25 @@ achromatic_curves:
   mean_mask_tolerant_f1    ≈ 0.89
 
 local_occlusion_curves:
-  mean_chamfer_distance_px ≈ 0.96
-  mean_hausdorff_distance_px ≈ 13.8
+  mean_chamfer_distance_px ≈ 0.97
+  mean_hausdorff_distance_px ≈ 14.2
   mean_data_y_rmse ≈ 0.012
 
 crossing_curves:
-  mean_chamfer_distance_px ≈ 0.94
-  mean_hausdorff_distance_px ≈ 8.8
+  mean_chamfer_distance_px ≈ 0.95
+  mean_hausdorff_distance_px ≈ 9.7
   mean_data_y_rmse ≈ 0.0095
 
 legend_inside_curves，不排除图例:
-  mean_chamfer_distance_px ≈ 5.13
+  mean_chamfer_distance_px ≈ 5.20
   mean_hausdorff_distance_px ≈ 252.40
 
 legend_inside_curves，排除图像启发式检测到的图例区域:
-  mean_chamfer_distance_px ≈ 0.85
+  mean_chamfer_distance_px ≈ 0.84
   mean_hausdorff_distance_px ≈ 6.40
 
 legend_inside_curves，排除合成图例区域:
-  mean_chamfer_distance_px ≈ 0.85
+  mean_chamfer_distance_px ≈ 0.84
   mean_hausdorff_distance_px ≈ 6.40
 ```
 
@@ -138,8 +139,8 @@ Get-Content temp\legend_detected_exclude.json
 - 目前对颜色可分、函数型曲线的恢复已经形成稳定工程闭环。
 - 局部短遮挡和轻度交叉已经进入固定回归测试，数据空间误差仍保持在较低水平。
 - 绘图区内图例污染会显著拉高误差，但图像启发式图例排除可以把指标恢复到正常范围。
-- `tests/test1.png` 属于真实灰度样例；当前已能检测并排除右上角无框图例，但 mask 中仍可能包含 marker、刻度或边框残留。当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
-- 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进刻度 OCR 语义解析、完整图例解析、marker 曲线和同色不同线型。
+- `tests/test1.png` 属于真实灰度样例；当前已能检测并排除右上角无框图例，`paths_overlay.png` 也不再绘制跨片段长连线。但 mask 中仍会把同色/近灰度线条、marker 和部分刻度残片混在一起。当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
+- 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进图例样本解析、marker/线型实例分离、刻度 OCR 语义解析和复杂灰度图归属。
 
 展示时重点查看的输出文件：
 
@@ -999,6 +1000,7 @@ legend_inside_curves，image_heuristic 图例排除:
 
 - 优化 `colors.py`：提高黑色、灰色、低饱和曲线和抗锯齿边缘的 prototype 稳定性。
 - 优化 `masks.py`：降低网格线、文字、坐标轴和图例残留污染。
+- 当前 `masks.py` 已加入保守的边缘极小刻度残片过滤；该规则只处理紧贴边缘的微小组件，避免误删虚线/点线曲线端点。
 - 优化 `lines.py`：将多连通分量按距离、方向、端点切线和曲率连续性综合排序，并预留 X 重叠、超长 gap 和短片段惩罚权重。
 - 当前已增加 gap linking 的端点切线角约束，可通过 `--max_gap_tangent_angle` 调整。
 - 当前已增加骨架短毛刺剪枝，减少伪分叉对主路径追踪的影响。
@@ -1027,7 +1029,7 @@ achromatic_curves:
   出现歧义时有 warnings 或低置信度记录
 ```
 
-当前状态：路径追踪、短毛刺剪枝、综合片段连接评分、gap linking、局部短遮挡 benchmark 和轻度交叉 benchmark 已可用；复杂交叉、同色线型归属、线型周期建模和长遮挡补全待做。
+当前状态：路径追踪、短毛刺剪枝、综合片段连接评分、gap linking、局部短遮挡 benchmark、轻度交叉 benchmark 和保守 mask 残片过滤已可用；复杂交叉、同色线型归属、marker 分离、线型周期建模和长遮挡补全待做。
 
 ### 阶段 F：坐标轴、OCR 与数据空间映射
 

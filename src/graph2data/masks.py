@@ -25,6 +25,10 @@ class MaskExtractorConfig:
     inset_px: int = 3
     drop_border_components: bool = True
     drop_grid_like_components: bool = True
+    drop_axis_tick_components: bool = True
+    axis_tick_edge_margin_px: int = 4
+    axis_tick_max_span_px: int = 3
+    axis_tick_max_thickness_px: int = 4
     suppress_dark_neighbors_for_gray: bool = True
     dark_neighbor_l: int = 80
     dark_neighbor_dilate: int = 3
@@ -103,6 +107,10 @@ class CurveMaskExtractor:
             self.config.min_component_x_span,
             drop_border_components=self.config.drop_border_components,
             drop_grid_like_components=self.config.drop_grid_like_components,
+            drop_axis_tick_components=self.config.drop_axis_tick_components,
+            axis_tick_edge_margin_px=self.config.axis_tick_edge_margin_px,
+            axis_tick_max_span_px=self.config.axis_tick_max_span_px,
+            axis_tick_max_thickness_px=self.config.axis_tick_max_thickness_px,
         )
 
 
@@ -112,6 +120,10 @@ def _filter_components(
     min_x_span: int,
     drop_border_components: bool = True,
     drop_grid_like_components: bool = True,
+    drop_axis_tick_components: bool = True,
+    axis_tick_edge_margin_px: int = 4,
+    axis_tick_max_span_px: int = 3,
+    axis_tick_max_thickness_px: int = 4,
 ) -> np.ndarray:
     num, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
     out = np.zeros_like(mask)
@@ -128,9 +140,15 @@ def _filter_components(
             (x <= 0 or x + width >= w) and height >= 0.75 * h and width <= 6
         )
         grid_like = (width >= 0.35 * w and height <= 4) or (height >= 0.35 * h and width <= 4)
+        near_left_or_right = x <= axis_tick_edge_margin_px or x + width >= w - axis_tick_edge_margin_px
+        near_top_or_bottom = y <= axis_tick_edge_margin_px or y + height >= h - axis_tick_edge_margin_px
+        horizontal_tick_like = near_left_or_right and width <= axis_tick_max_span_px and height <= axis_tick_max_thickness_px
+        vertical_tick_like = near_top_or_bottom and height <= axis_tick_max_span_px and width <= axis_tick_max_thickness_px
         if drop_border_components and border_like:
             continue
         if drop_grid_like_components and grid_like:
+            continue
+        if drop_axis_tick_components and (horizontal_tick_like or vertical_tick_like):
             continue
         if area >= min_area and width >= min_x_span:
             out[labels == idx] = 255

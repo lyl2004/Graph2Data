@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 from graph2data.benchmark import run_suite
 from graph2data.image_io import load_bgr
@@ -18,6 +19,7 @@ from graph2data.lines import (
     _segment_connection_cost,
 )
 from graph2data.mapping import map_curve_path_to_data
+from graph2data.masks import _filter_components
 from graph2data.models import BoundingBox, CurvePath, DataRange, PlotArea, Point
 from graph2data.pipeline import GraphExtractionPipeline, PipelineConfig
 from graph2data.quality import evaluate_data_series
@@ -213,6 +215,21 @@ def test_short_spur_pruning_preserves_simple_dash_component():
     pruned = _prune_short_spurs(dash, max_spur_length=4)
 
     assert pruned == dash
+
+
+def test_mask_filter_removes_axis_ticks_but_keeps_inner_curve_segments():
+    mask = np.zeros((100, 160), dtype=np.uint8)
+    mask[20:23, 0:3] = 255
+    mask[97:100, 42:45] = 255
+    mask[45:47, 50:80] = 255
+    mask[47:49, 80:108] = 255
+    mask[49:51, 108:132] = 255
+
+    filtered = _filter_components(mask, min_area=4, min_x_span=3)
+
+    assert int(filtered[20:23, 0:16].sum()) == 0
+    assert int(filtered[88:100, 42:45].sum()) == 0
+    assert int(filtered[45:51, 50:132].sum()) > 0
 
 
 def test_segment_connection_cost_rejects_large_backward_jump():
