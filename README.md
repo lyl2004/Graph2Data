@@ -179,8 +179,11 @@ pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_insid
 - 坐标轴检测误差：绘图区边界误差、原点误差、轴终点误差。
 - 曲线路径误差：Chamfer distance、Hausdorff distance、pred-to-truth 和 truth-to-pred 距离分布。
 - observed/completed 分离误差：分别评估真实观测点和补全点相对真值曲线的偏差。
+- `benchmark.py` 在 predicted-mask 模式下额外输出 mask 级指标：IoU、Precision、Recall、F1，以及 2px 容差版 Precision/Recall/F1。
 
 其中 truth-to-pred 距离对虚线和遮挡尤其重要，因为它能反映真值曲线中有多少区域没有被提取路径覆盖。
+
+线条 mask 属于细线目标，原始 IoU 会受到线宽和抗锯齿差异明显影响。因此后续判断“曲线像素是否提到正确位置”时，应同时看 2px 容差版 F1；原始 IoU 更适合观察 mask 是否过宽、污染是否过多。
 
 当前纯图形学分辨基线在合成图上的参考结果：
 
@@ -188,18 +191,22 @@ pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_insid
 basic_curves predicted-mask:
   mean_chamfer_distance_px ≈ 0.83
   mean_truth_to_pred_px    ≈ 0.87
+  mean_mask_tolerant_f1    ≈ 0.89
 
 achromatic_curves predicted-mask:
   mean_chamfer_distance_px ≈ 0.87
   mean_truth_to_pred_px    ≈ 0.92
+  mean_mask_tolerant_f1    ≈ 0.89
 
 legend_inside_curves predicted-mask，不排除图例:
   mean_chamfer_distance_px ≈ 5.13
   mean_hausdorff_distance_px ≈ 252.40
+  mean_mask_tolerant_f1    ≈ 0.87
 
 legend_inside_curves predicted-mask，排除合成图例区域:
   mean_chamfer_distance_px ≈ 0.83
   mean_hausdorff_distance_px ≈ 6.40
+  mean_mask_tolerant_f1    ≈ 0.89
 ```
 
 `achromatic_curves` 用于验证黑色曲线、灰色曲线和彩色曲线共存时的分辨能力。当前策略包括：

@@ -147,6 +147,7 @@ def run_predicted_mask_benchmark(
         cv2.imwrite(str(mask_path), mask)
         path = path_extractor.extract_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id=truth["curve_id"])
         metrics = evaluate_curve_path(to_serializable(path), truth_axes, str(truth_data_path), truth["curve_id"])
+        metrics.update(_evaluate_mask_against_truth(mask, root / truth["mask_path"]))
         metrics["matched_rgb"] = matched.rgb
         metrics["truth_color"] = truth["color"]
         metrics["mask_pixel_count"] = mask_info.pixel_count
@@ -164,6 +165,13 @@ def run_predicted_mask_benchmark(
         "mean_chamfer_distance_px": _mean(valid, "chamfer_distance_px"),
         "mean_hausdorff_distance_px": _mean(valid, "hausdorff_distance_px"),
         "mean_truth_to_pred_px": _mean(valid, "mean_truth_to_pred_px"),
+        "mean_mask_iou": _mean(rows, "mask_iou"),
+        "mean_mask_precision": _mean(rows, "mask_precision"),
+        "mean_mask_recall": _mean(rows, "mask_recall"),
+        "mean_mask_f1": _mean(rows, "mask_f1"),
+        "mean_mask_tolerant_precision": _mean(rows, "mask_tolerant_precision"),
+        "mean_mask_tolerant_recall": _mean(rows, "mask_tolerant_recall"),
+        "mean_mask_tolerant_f1": _mean(rows, "mask_tolerant_f1"),
         "mean_completed_to_truth_px": _mean(
             [m for m in valid if m.get("mean_completed_to_truth_px") is not None], "mean_completed_to_truth_px"
         ),
@@ -222,12 +230,71 @@ def _rgb_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
+def _evaluate_mask_against_truth(predicted_mask, truth_mask_path: Path) -> Dict:
+    truth_mask = cv2.imread(str(truth_mask_path), cv2.IMREAD_GRAYSCALE)
+    if truth_mask is None:
+        return {
+            "mask_iou": None,
+            "mask_precision": None,
+            "mask_recall": None,
+            "mask_f1": None,
+            "mask_tolerant_precision": None,
+            "mask_tolerant_recall": None,
+            "mask_tolerant_f1": None,
+            "mask_true_positive": 0,
+            "mask_false_positive": 0,
+            "mask_false_negative": 0,
+        }
+    if truth_mask.shape != predicted_mask.shape:
+        truth_mask = cv2.resize(truth_mask, (predicted_mask.shape[1], predicted_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    pred = predicted_mask > 0
+    truth = truth_mask > 127
+    true_positive = int((pred & truth).sum())
+    false_positive = int((pred & ~truth).sum())
+    false_negative = int((~pred & truth).sum())
+    union = true_positive + false_positive + false_negative
+
+    precision = _safe_divide(true_positive, true_positive + false_positive)
+    recall = _safe_divide(true_positive, true_positive + false_negative)
+    f1 = None if precision is None or recall is None or precision + recall == 0 else 2.0 * precision * recall / (precision + recall)
+    tolerant_precision, tolerant_recall, tolerant_f1 = _evaluate_tolerant_mask_match(pred, truth, tolerance_px=2)
+    return {
+        "mask_iou": _safe_divide(true_positive, union),
+        "mask_precision": precision,
+        "mask_recall": recall,
+        "mask_f1": f1,
+        "mask_tolerant_precision": tolerant_precision,
+        "mask_tolerant_recall": tolerant_recall,
+        "mask_tolerant_f1": tolerant_f1,
+        "mask_true_positive": true_positive,
+        "mask_false_positive": false_positive,
+        "mask_false_negative": false_negative,
+    }
+
+
+def _evaluate_tolerant_mask_match(pred, truth, tolerance_px: int = 2) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    kernel_size = 2 * tolerance_px + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    pred_dilated = cv2.dilate(pred.astype("uint8"), kernel) > 0
+    truth_dilated = cv2.dilate(truth.astype("uint8"), kernel) > 0
+    pred_count = int(pred.sum())
+    truth_count = int(truth.sum())
+    precision = _safe_divide(int((pred & truth_dilated).sum()), pred_count)
+    recall = _safe_divide(int((truth & pred_dilated).sum()), truth_count)
+    f1 = None if precision is None or recall is None or precision + recall == 0 else 2.0 * precision * recall / (precision + recall)
+    return precision, recall, f1
+
+
 def _legend_exclusion_delta(before: Dict, after: Dict) -> Dict:
     keys = [
         "mean_chamfer_distance_px",
         "mean_hausdorff_distance_px",
         "mean_truth_to_pred_px",
         "mean_completed_to_truth_px",
+        "mean_mask_iou",
+        "mean_mask_f1",
+        "mean_mask_tolerant_f1",
     ]
     delta = {}
     for key in keys:
@@ -245,6 +312,12 @@ def _mean(rows: List[Dict], key: str):
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _safe_divide(numerator: int, denominator: int) -> Optional[float]:
+    if denominator == 0:
+        return None
+    return float(numerator) / float(denominator)
 
 
 def main() -> None:
