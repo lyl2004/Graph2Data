@@ -1,0 +1,133 @@
+"""Curve color prototype extraction."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import List, Optional
+
+import cv2
+import numpy as np
+
+from .models import BoundingBox, CurvePrototype
+
+
+@dataclass
+class ColorExtractorConfig:
+    step: int = 1
+    diff: int = 15
+    min_area: int = 2
+    min_l: int = 10
+    max_l: int = 240
+    min_chroma: int = 10
+    merge_diff_l: int = 80
+    merge_diff_ab: int = 20
+    min_ratio: float = 0.001
+    max_ratio: float = 0.90
+
+
+class CurveColorExtractor:
+    """Extract curve color prototypes from a plot image or region."""
+
+    def __init__(self, config: Optional[ColorExtractorConfig] = None):
+        self.config = config or ColorExtractorConfig()
+
+    def extract(self, image_bgr: np.ndarray, region: Optional[BoundingBox] = None) -> List[CurvePrototype]:
+        crop, offset = self._crop(image_bgr, region)
+        if crop.size == 0:
+            return []
+
+        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2Lab)
+        lab_float = lab.astype(np.float32)
+        h, w = crop.shape[:2]
+        total_pixels = h * w
+        cfg = self.config
+
+        l_channel = lab[:, :, 0]
+        a_centered = lab_float[:, :, 1] - 128
+        b_centered = lab_float[:, :, 2] - 128
+        chroma = np.sqrt(a_centered**2 + b_centered**2)
+        ignore = (l_channel < cfg.min_l) | (l_channel > cfg.max_l) | (chroma < cfg.min_chroma)
+
+        visited = np.zeros((h, w), dtype=bool)
+        visited[ignore] = True
+        mask_template = np.zeros((h + 2, w + 2), np.uint8)
+        raw_regions = []
+
+        for y in range(0, h, cfg.step):
+            for x in range(0, w, cfg.step):
+                if visited[y, x]:
+                    continue
+                mask = mask_template.copy()
+                flags = 4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (255 << 8)
+                tolerance = (cfg.diff, cfg.diff, cfg.diff)
+                area, _, _, _ = cv2.floodFill(lab, mask, (x, y), (0, 0, 0), tolerance, tolerance, flags)
+                region_mask = mask[1 : h + 1, 1 : w + 1].astype(bool)
+                visited[region_mask] = True
+                if area < cfg.min_area:
+                    continue
+                mean_lab = cv2.mean(lab, mask=region_mask.astype(np.uint8))[:3]
+                c_val = math.sqrt((mean_lab[1] - 128) ** 2 + (mean_lab[2] - 128) ** 2)
+                if cfg.min_l <= mean_lab[0] <= cfg.max_l and c_val >= cfg.min_chroma:
+                    raw_regions.append({"lab": np.array(mean_lab, dtype=np.float32), "area": int(area)})
+
+        merged = self._merge_regions(raw_regions)
+        return self._to_prototypes(merged, total_pixels, offset)
+
+    def _crop(self, image_bgr: np.ndarray, region: Optional[BoundingBox]):
+        if region is None:
+            return image_bgr.copy(), (0, 0)
+        h, w = image_bgr.shape[:2]
+        x0 = max(0, int(region.x_min))
+        y0 = max(0, int(region.y_min))
+        x1 = min(w, int(region.x_max))
+        y1 = min(h, int(region.y_max))
+        return image_bgr[y0:y1, x0:x1].copy(), (x0, y0)
+
+    def _merge_regions(self, raw_regions):
+        cfg = self.config
+        raw_regions.sort(key=lambda x: x["area"], reverse=True)
+        palette = []
+        for region in raw_regions:
+            curr_lab = region["lab"]
+            curr_area = region["area"]
+            matched = False
+            for p in palette:
+                delta_l = abs(curr_lab[0] - p["lab"][0])
+                delta_ab = math.hypot(curr_lab[1] - p["lab"][1], curr_lab[2] - p["lab"][2])
+                if delta_l < cfg.merge_diff_l and delta_ab < cfg.merge_diff_ab:
+                    new_area = p["area"] + curr_area
+                    p["lab"] = (p["lab"] * p["area"] + curr_lab * curr_area) / new_area
+                    p["area"] = new_area
+                    p["count"] += 1
+                    matched = True
+                    break
+            if not matched:
+                palette.append({"lab": curr_lab, "area": curr_area, "count": 1})
+        return palette
+
+    def _to_prototypes(self, palette, total_pixels: int, offset) -> List[CurvePrototype]:
+        cfg = self.config
+        prototypes: List[CurvePrototype] = []
+        for p in palette:
+            ratio = p["area"] / max(total_pixels, 1)
+            if ratio < cfg.min_ratio or ratio > cfg.max_ratio:
+                continue
+            lab_pix = np.uint8([[p["lab"]]])
+            bgr = cv2.cvtColor(lab_pix, cv2.COLOR_Lab2BGR)[0][0]
+            rgb = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+            lab_tuple = (float(p["lab"][0]), float(p["lab"][1]), float(p["lab"][2]))
+            confidence = float(max(0.0, min(1.0, ratio / max(cfg.min_ratio * 10, 1e-9))))
+            prototypes.append(
+                CurvePrototype(
+                    curve_id=f"curve_color_{len(prototypes)}",
+                    rgb=rgb,
+                    lab=lab_tuple,
+                    area=int(p["area"]),
+                    ratio=float(ratio),
+                    confidence=confidence,
+                    source="direct",
+                )
+            )
+        prototypes.sort(key=lambda c: c.area, reverse=True)
+        return prototypes

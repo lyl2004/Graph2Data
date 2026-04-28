@@ -31,6 +31,116 @@ Graph2Data/
   pixi.lock            锁定依赖版本
 ```
 
+## 当前重构入口
+
+第一阶段工程化重构已经开始，新的正式包位于：
+
+```text
+src/graph2data/
+```
+
+当前已建立的模块：
+
+```text
+models.py       统一数据结构
+image_io.py     图像和 JSON artifact I/O
+axes.py         坐标轴和绘图区检测
+layout.py       基于绘图区的九宫格划分和 OCR 归类
+ocr.py          RapidOCR 包装
+colors.py       曲线颜色原型提取
+pipeline.py     结构化 pipeline 入口
+synthetic.py    合成 benchmark 生成器
+quality.py      最小质量评估工具
+lines.py        mask 骨架化和有序路径追踪
+benchmark.py    批量 benchmark runner
+```
+
+可以用以下命令运行结构化 pipeline：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1.json --colors
+```
+
+如需开启 OCR：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1_ocr.json --ocr --colors
+```
+
+当前新 pipeline 的目标不是一次性替代所有 `tests/` 原型，而是先建立稳定的数据接口和 JSON 输出。后续会逐步把 `tests/test_pre.py`、`test_ocr.py`、`test_colors.py`、`test_lines.py` 中成熟的算法迁移进正式模块。
+
+生成一个带真值数据的合成 benchmark：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name basic_curves
+```
+
+该命令会输出：
+
+```text
+benchmarks/synthetic/basic_curves/
+  image.png
+  manifest.json
+  truth_axes.json
+  truth_curves.json
+  truth_data.csv
+  masks/
+```
+
+运行 pipeline 并评估坐标轴检测：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img benchmarks\synthetic\basic_curves\image.png --out temp\basic_curves_pipeline.json --colors
+pixi run python -m graph2data.quality --prediction temp\basic_curves_pipeline.json --truth_axes benchmarks\synthetic\basic_curves\truth_axes.json
+```
+
+从单条曲线 mask 提取有序像素路径：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.lines --mask benchmarks\synthetic\basic_curves\masks\curve_00.png --curve_id curve_00 --out temp\curve_00_path.json
+```
+
+评估提取路径与真值曲线的像素误差：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.quality --path temp\curve_00_path.json --truth_axes benchmarks\synthetic\basic_curves\truth_axes.json --truth_data benchmarks\synthetic\basic_curves\truth_data.csv --curve_id curve_00
+```
+
+批量评估合成案例的所有曲线 mask：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\basic_curves --out temp\basic_curves_benchmark.json
+```
+
+当前 `lines.py` 是线条提取的第一版基线：
+
+- 对 mask 二值化。
+- 执行骨架化。
+- 将骨架像素构造成 8 邻域图。
+- 检测端点和交叉/分叉点。
+- 对单连通曲线追踪主路径。
+- 对虚线/点线等多连通分量，先逐片段追踪，再按 X 方向拼接。
+- 对合理距离和角度内的片段间隔执行第一版直线 gap linking。
+- 在 `completed_ranges` 和 `completed_pixel_count` 中记录补全位置和数量。
+- 在 `confidence_per_point` 中记录点级置信度；原始观测点为高置信度，补全点为低置信度。
+
+这能为后续的方向约束、曲率约束、虚线间距建模和机器学习 centerline 输出提供统一路径结构。
+
+当前 `quality.py` 已支持两类基础指标：
+
+- 坐标轴检测误差：绘图区边界误差、原点误差、轴终点误差。
+- 曲线路径误差：Chamfer distance、Hausdorff distance、pred-to-truth 和 truth-to-pred 距离分布。
+- observed/completed 分离误差：分别评估真实观测点和补全点相对真值曲线的偏差。
+
+其中 truth-to-pred 距离对虚线和遮挡尤其重要，因为它能反映真值曲线中有多少区域没有被提取路径覆盖。
+
 ## 已成型流程：CSV 校正
 
 CSV 校正部分当前主要服务于 WebPlotDigitizer / Automeris 这类外部工具导出的点数据。它不直接负责识别图像，而是将已经提取出的点转换为可用数据。
@@ -386,3 +496,442 @@ OCR 刻度解析置信度
 ```
 
 这将使 Graph2Data 能够逐步从外部网站导出依赖，过渡到可信的本地图表数据恢复工具。
+
+## 工程推进路线
+
+本项目不建议直接从复杂算法或机器学习开始。更稳妥的推进方式是：
+
+```text
+工程化现有原型
+-> 建立可复现 benchmark
+-> 固化坐标轴、OCR、映射基础能力
+-> 改造图形学线条提取
+-> 引入机器学习处理困难区域
+-> 最后完善 GUI、人工修正和批处理
+```
+
+核心原因是：如果没有统一数据结构、真值数据和误差指标，每个模块都可能看起来有效，但无法判断整体结果是否真正变好。
+
+### 阶段 0：工程化原型
+
+将 `tests/` 下的实验脚本逐步迁移为正式模块。建议结构：
+
+```text
+src/graph2data/
+  __init__.py
+  pipeline.py
+  models.py
+  image_io.py
+  preprocess.py
+  ocr.py
+  axes.py
+  layout.py
+  legend.py
+  colors.py
+  lines.py
+  mapping.py
+  quality.py
+  export.py
+```
+
+优先定义统一数据结构：
+
+```text
+OCRTextBox
+AxisDetection
+PlotArea
+LayoutRegions
+CurvePrototype
+CurveMask
+CurvePath
+DataSeries
+QualityReport
+PipelineResult
+```
+
+每个模块应返回结构化对象，不应直接依赖 `print`、`imshow`、`plt.show`。调试结果应作为 artifact 保存。
+
+### 阶段 1：建立 Benchmark
+
+扩展 `tests/test_draw.py`，使其不仅生成测试图，还同步生成真值：
+
+```text
+image.png
+truth_axes.json
+truth_curves.json
+truth_masks/
+truth_data.csv
+```
+
+覆盖场景：
+
+```text
+单色/多色曲线
+黑色曲线
+灰色曲线
+实线/虚线/点线
+marker 曲线
+有/无图例
+有/无网格
+曲线交叉
+局部遮挡
+高度重叠
+log 坐标轴
+双 Y 轴
+低分辨率和压缩图
+```
+
+评价指标：
+
+```text
+坐标轴：像素误差、绘图区 IoU
+OCR：刻度识别准确率、数值解析准确率
+颜色/图例：curve prototype 匹配率
+mask：IoU、Precision、Recall、F1
+path：Chamfer distance、Hausdorff distance
+数据：RMSE、MAE、Max Error、R2
+```
+
+没有 benchmark 之前，不建议引入机器学习作为主路径。
+
+### 阶段 2：坐标轴与版面理解
+
+坐标轴检测建议采用规则和图形学组合，而不是一开始机器学习。候选方法：
+
+```text
+Canny / threshold
++ HoughLinesP
++ connected components
++ OCR tick distribution
++ layout scoring
+```
+
+从“固定取最下水平线和最左垂直线”升级为候选打分：
+
+```text
+score(axis_pair) =
+  长度分
++ 正交分
++ 位置分
++ 刻度文字贴近分
++ 网格线一致性分
++ 曲线像素落入区域分
+```
+
+输出应包含最佳结果、候选列表、置信度和失败原因。
+
+### 阶段 3：OCR 与刻度解析
+
+OCR 可继续采用 RapidOCR，重点放在后处理：
+
+```text
+全图 OCR
+-> 根据 plot_area 分区
+-> 文本类型分类
+-> 数值文本解析
+-> tick 位置拟合
+-> 坐标尺度判断
+```
+
+数值解析应支持：
+
+```text
+-1.2
+1e-3
+10^-2
+×10^3
+1,000
+log / ln
+```
+
+线性轴使用线性回归拟合 `pixel -> data`；log 轴先对数据值取 `log10` 再拟合。
+
+### 阶段 4：图例与曲线特征
+
+曲线身份识别分两种路径：
+
+```text
+有图例：legend-first
+无图例：plot-first
+```
+
+有图例时，寻找短线段、marker 和相邻文本组合，生成曲线原型。无图例时，直接在绘图区聚类曲线颜色和线型。
+
+颜色提取建议从当前 floodFill 手写聚类逐步升级为：
+
+```text
+有效像素采样
+-> Lab 特征
+-> DBSCAN / HDBSCAN / 层次聚类
+-> 聚类中心
+-> 反投影生成每类 mask
+```
+
+输出标准曲线原型：
+
+```text
+curve_id
+label
+rgb/lab
+line_style
+marker_style
+confidence
+source: legend/direct
+```
+
+### 阶段 5：线条提取算法选型
+
+线条提取是本项目核心难点。建议采用分层方案。
+
+#### 基线方案：图形学 + 图搜索
+
+适用于颜色可分、遮挡较轻的图表：
+
+```text
+curve prototype
+-> 颜色/线型 mask
+-> 去除坐标轴、文字、网格
+-> skeletonize
+-> graph construction
+-> endpoint / junction detection
+-> path tracing
+-> gap linking
+-> centerline smoothing
+```
+
+关键技术：
+
+- 彩色曲线：Lab 色差阈值。
+- 黑色曲线：绘图区内黑色像素减去坐标轴、文字、刻度和图例。
+- 灰色曲线：结合方向、线宽、连通性排除网格。
+- 骨架化：`skimage.morphology.skeletonize` 或 `cv2.ximgproc.thinning`。
+- 图建模：骨架像素为节点，8 邻域为边。
+- 关键点：`degree == 1` 为端点，`degree >= 3` 为分叉或交叉。
+
+断点连接不应只按距离，应使用代价函数：
+
+```text
+cost =
+  distance_weight * endpoint_distance
++ angle_weight * tangent_angle_diff
++ curvature_weight * curvature_change
++ color_weight * color_consistency
++ crossing_penalty
+```
+
+#### 虚线和点线
+
+虚线应按 stroke segment 处理：
+
+```text
+同色短片段检测
+-> 局部方向估计
+-> 片段级图构建
+-> 按方向、间距、颜色匹配连接
+```
+
+segment 结构：
+
+```text
+points
+center
+length
+tangent
+color
+bbox
+```
+
+#### 交叉和重叠
+
+交叉点需要特殊处理：
+
+- 检测 junction。
+- 提取进入和离开的分支。
+- 用切线方向做连续性配对。
+- 颜色不同则按颜色直接分开。
+- 颜色相同但线型不同则按线型节奏或 marker 区分。
+- 信息不足时标记为 ambiguous，不强行输出伪确定结果。
+
+#### 机器学习方案
+
+机器学习有必要引入，但不建议端到端图片转 CSV。更合适的路线：
+
+```text
+图形学负责高置信度区域
+机器学习负责困难区域的分割、归属和补全
+规则系统负责坐标映射和质量校验
+```
+
+推荐选型：
+
+1. 语义分割：U-Net、DeepLabV3+、SegFormer-B0/B1。
+2. 中心线预测：输出 centerline probability heatmap。
+3. 条件分割：输入图像 + 曲线特征或图例 patch，输出指定曲线 mask。
+
+推荐路线：
+
+```text
+第一阶段：合成数据训练 U-Net / SegFormer 做曲线语义 mask
+第二阶段：扩展为多通道实例 mask
+第三阶段：做 prototype-conditioned curve segmentation
+第四阶段：对遮挡和重叠区域预测 centerline heatmap
+```
+
+不建议训练“图片直接输出 CSV”的端到端回归模型。科学数据恢复需要可解释中间结果。
+
+### 阶段 6：数值化与映射
+
+线条提取模块最终应输出：
+
+```text
+CurvePath {
+  curve_id
+  pixel_points_ordered
+  observed_mask
+  completed_mask
+  ambiguous_regions
+  confidence_per_point
+}
+```
+
+数值化流程：
+
+```text
+ordered pixel path
+-> 裁剪到 plot_area
+-> 按 X 或路径重采样
+-> 像素坐标归一化
+-> 映射数据坐标
+-> 清洗、拟合、导出
+```
+
+常规 `y = f(x)` 曲线可按 X 采样；参数曲线、回折曲线和闭合曲线应保留路径顺序。
+
+## 项目难度与完成度预期
+
+### 整体实现难度
+
+Graph2Data 的整体难度较高。它不是单一 OCR、图像分割或曲线拟合问题，而是多个不稳定视觉任务和科学数据约束的组合：
+
+```text
+图表结构理解
+OCR 语义解析
+曲线实例分割
+遮挡与重叠推断
+像素到数据空间映射
+质量评估与可追溯导出
+```
+
+其中坐标轴检测、颜色曲线提取、CSV 校正属于中等难度；OCR 刻度语义解析、黑色/灰色曲线分离、交叉点归属属于较高难度；高度重叠和严重遮挡曲线补全属于高难度甚至部分病态问题。
+
+### 完成度预期
+
+合理的完成度目标应分层设定：
+
+1. 基础完成度：处理清晰、常规、彩色、多曲线但不严重重叠的科学图表。
+2. 中级完成度：支持图例解析、log 轴、虚线、marker、局部遮挡和轻度交叉。
+3. 高级完成度：支持黑白图、灰色曲线、复杂图例、多坐标轴和部分高度重叠。
+4. 研究级完成度：对严重遮挡和高度重叠给出概率化恢复、置信度和人工修正入口。
+
+短中期不应追求对所有论文图“一键完美提取”。更现实的目标是：
+
+```text
+常规图自动化
+复杂图半自动化
+病态图可诊断、可修正、可追溯
+```
+
+### 精度预期
+
+精度取决于图像质量、曲线复杂度、坐标轴识别质量和曲线是否可分。
+
+对清晰彩色图：
+
+- 坐标轴定位可达到 1-3 像素级误差。
+- 曲线 mask F1 有机会达到 0.90 以上。
+- 最终数据 RMSE 可接近 WebPlotDigitizer 人工提取结果。
+
+对有轻度交叉和局部遮挡的图：
+
+- 如果颜色或线型可区分，主要曲线段可达到较高可用性。
+- 遮挡段应输出补全标记和较低置信度。
+- 最终数据精度可能在局部下降，但整体趋势仍可恢复。
+
+对黑白、灰度、同色多线型图：
+
+- 单靠颜色分割不可行，需要线型、marker、拓扑和图例辅助。
+- 精度将明显依赖图像分辨率和线型可辨识度。
+
+对高度重叠病态图：
+
+- 不应承诺确定性高精度。
+- 如果信息本身不足，算法只能基于上下文推断。
+- 应输出多个候选路径、置信度和人工确认入口。
+
+因此最终系统的理想输出不是单一 CSV，而是：
+
+```text
+数据表
++ 曲线级置信度
++ 点级置信度
++ 补全区域标记
++ ambiguous 区域
++ 质量报告
+```
+
+## 项目价值评价
+
+### 工程价值
+
+Graph2Data 有明确工程价值。现有 WebPlotDigitizer 这类工具强依赖人工交互，批量化和可追溯能力有限。本项目如果完成稳定 pipeline，可以提供：
+
+- 本地图表数据恢复。
+- 批量处理能力。
+- 自动质量报告。
+- 可保存的中间结果。
+- 与 Python 科学计算生态直接集成。
+- 对 WebPlotDigitizer 导出结果的后处理和校验。
+
+即使最终不能完全自动处理所有复杂图，作为“自动提取 + 人工修正 + 质量评估”的工具也有实际价值。
+
+### 科研价值
+
+科研上，本项目位于文献图表理解、科学数据恢复和细粒度曲线实例分割的交叉点。它的价值不只是做一个工具，还包括：
+
+- 建立科学图表曲线提取 benchmark。
+- 研究细线条实例分割与中心线恢复。
+- 研究图例和绘图区之间的视觉对应关系。
+- 研究 OCR 刻度语义与坐标映射。
+- 研究遮挡曲线的概率化补全和不确定性表达。
+
+如果能系统化生成合成数据、真值 mask、真值曲线和误差评价，就具备较强的实验研究价值。
+
+### 创新点
+
+潜在创新点包括：
+
+- 将图例 prototype 条件化用于曲线实例分割。
+- 将图形学骨架追踪和机器学习 centerline heatmap 结合。
+- 对复杂图表提取结果输出点级置信度和 ambiguous 区域，而不是只输出单一结果。
+- 将 CSV 校正、曲线补全和质量报告集成为闭环。
+- 用可控合成图系统性评估曲线提取算法。
+
+### 风险评价
+
+主要风险：
+
+- 真实论文图风格差异极大。
+- 高度重叠曲线存在不可辨识情况。
+- OCR 错误会直接影响坐标映射。
+- 黑白图、压缩图、扫描图会显著降低视觉特征质量。
+- 机器学习需要足够多样的训练数据和清晰真值。
+
+应对策略：
+
+- 不追求一步到位。
+- 先建立 benchmark。
+- 让所有模块输出置信度和失败原因。
+- 保留人工修正入口。
+- 将自动化目标限定为“常规图高自动化，复杂图辅助式恢复”。
+
+综合评价：Graph2Data 是一个实现难度高但价值明确的项目。其工程价值在于替代和增强现有人工图表数字化流程；科研价值在于细粒度图表理解、曲线实例分割和不确定性数据恢复。只要按模块化、可评估、可追溯的路线推进，该项目有希望达到较高实用完成度。

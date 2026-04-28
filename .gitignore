@@ -28,6 +28,7 @@ Thumbs.db
 
 # Runtime outputs
 temp/
+benchmarks/synthetic/
 *.log
 *_ocr_result.png
 *_ocr_result.jpg
