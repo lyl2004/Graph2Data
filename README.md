@@ -156,6 +156,92 @@ temp/stage_demo_artifacts/masks/*.png
 temp/stage_demo_artifacts/quality/report.json
 ```
 
+## 下一阶段工作计划
+
+当前节点已经证明基础 pipeline、benchmark 和 debug artifact 可以稳定运行。下一阶段应从“能跑通”转向“能区分真实图中的不同视觉实例”，核心目标是解决真实灰度图和论文截图中最常见的曲线归属问题。
+
+下一阶段名称：图例样本解析与曲线实例分离。
+
+阶段目标：
+
+```text
+把当前按颜色/灰度原型生成 mask 的流程，升级为“图例样本 -> 曲线视觉特征 -> 实例级 mask/path”的流程。
+重点解决同色或近灰度曲线、marker 曲线、虚线/点线、图例样本和绘图区曲线之间的绑定问题。
+```
+
+优先级最高的工作主线：
+
+1. 图例样本解析
+   - 在 `legend.py` 中把已检测到的 legend bbox 继续分解为若干 legend item。
+   - 对每个 item 提取样本线段、marker、颜色/灰度、线型和邻近文本。
+   - 新增结构化模型，例如 `LegendItem` 或 `CurveVisualPrototype`，用于描述一条曲线的视觉身份。
+   - 输出 debug artifact：`debug/legend_items.png`，能看到每个图例 item 的 bbox、样本线段和文本区域。
+
+2. Marker 与线型分离
+   - 在 `lines.py` 或独立模块中把 skeleton 组件分成 line-like、marker-like、text-like/noise 三类。
+   - 当前 `--line_filter_marker_like` 只是实验开关，下一阶段要把它升级为可解释分类器，而不是简单删除紧凑组件。
+   - 对 marker 曲线保留 marker 中心点，同时对连续线段保留 centerline，避免 marker 既污染路径又丢失曲线身份。
+   - 增加 synthetic case：纯 marker、线+marker、同色不同 marker、虚线密度变化。
+
+3. 图例到绘图区的实例绑定
+   - 将图例中提取到的颜色、灰度、线型、marker 特征用于约束绘图区 mask。
+   - 对彩色图继续使用颜色作为强特征；对灰度图增加线型、marker、局部方向和组件周期作为补充特征。
+   - 建立绑定评分：颜色/灰度相似度、线宽、marker 形状、dash 周期、路径连续性。
+   - 输出每条曲线的绑定置信度和 warnings，避免在歧义场景下静默给出错误结果。
+
+4. Benchmark 扩展与质量门
+   - 在 `synthetic.py` 中新增下一阶段固定场景：
+     - `marker_curves`
+     - `same_color_marker_curves`
+     - `same_gray_linestyle_curves`
+     - `dense_legend_curves`
+   - 在 `benchmark.py` 中增加 legend item / prototype 绑定指标：
+     - 图例 item 检出数量
+     - 曲线标签绑定准确率
+     - marker 中心点召回率
+     - 同色/同灰曲线实例分离准确率
+   - pytest 中新增小而稳定的单元测试，先覆盖图例 item 分解和 marker/line 组件分类。
+
+5. 真实图诊断闭环
+   - 继续使用 `tests/test1.png` 作为真实灰度诊断图。
+   - 下一阶段的真实图目标不是一次性完全解析它，而是让 artifact 明确显示：
+     - 图例 item 是否被正确分块。
+     - marker-like 组件是否被识别为 marker，而不是直接混入路径。
+     - 同灰度曲线为何被合并或为何能拆分。
+   - 所有真实图改动必须先通过 synthetic benchmark，避免为了一个真实样例破坏基础场景。
+
+建议实现顺序：
+
+```text
+1. 新增 LegendItem / CurveVisualPrototype 数据结构。
+2. 实现 legend bbox 内 item 分块和样本线段/文本区域提取。
+3. 为 legend item 输出 debug overlay 和 JSON。
+4. 扩展 synthetic：生成 marker 曲线和同色/同灰曲线。
+5. 实现 marker-like / line-like 组件分类，不默认删除任何组件。
+6. 用 legend prototype 约束 mask/path 提取，先在 synthetic 上验收。
+7. 再回到 tests/test1.png 做真实图 A/B 诊断。
+```
+
+下一阶段验收标准：
+
+```text
+pytest 全部通过
+compileall 通过
+原有 fixed benchmark suite 不退化
+新增 marker / same-gray / legend-item benchmark 有结构化指标
+真实样例 tests/test1.png 至少输出 legend_items.png、component_classification.png 和更清晰的 warnings
+README 中更新当前能力边界和展示命令
+```
+
+下一阶段非目标：
+
+```text
+暂不做 GUI。
+暂不引入机器学习作为主路径。
+暂不承诺任意论文图全自动解析。
+暂不把实验性 marker 过滤设为默认，除非 synthetic benchmark 证明不伤害虚线/点线。
+```
+
 ## 当前项目结构
 
 ```text
@@ -253,11 +339,11 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 
 当前下一步工程任务：
 
-1. 在 `pipeline.py` 中继续补全可视化 debug artifact，包括坐标轴候选细节、颜色 prototype 和 skeleton overlay；plot area、legend bbox、预测 mask、path overlay、映射 CSV 和基础质量报告已可通过 `--artifact_dir --debug_artifacts --map_data` 输出。
-2. 将 `legend.py` 从“只根据 OCR 文本簇排除污染区域”升级为“图例区域检测 + 图例样本提取 + 标签绑定”的两阶段结构。
-3. 扩展 `synthetic.py` 的场景覆盖：虚线密度变化、marker 曲线、轻度交叉、局部遮挡、同色不同线型、log 坐标轴。
-4. 增强 `lines.py` 的片段连接代价函数，从当前距离/角度规则升级为距离、切线、曲率、线型周期和交叉惩罚的组合评分。
-5. 继续完善 `mapping.py` 和数据空间质量评估，并把 `csv_processor.py` 的清洗、拟合和导出能力作为正式后处理内核接入 pipeline。
+1. 优先推进 `legend.py`：从“图例区域排除”升级为“图例 item 分块 + 样本线段/marker/文本提取 + 标签绑定”。
+2. 扩展 `synthetic.py`：增加 marker 曲线、同色不同 marker、同灰不同线型、密集图例等下一阶段固定场景。
+3. 增强 `lines.py`：把当前实验性 marker-like 过滤升级为 marker-like / line-like 组件分类，并输出分类 artifact。
+4. 在 `pipeline.py` 中增加 legend item overlay、component classification overlay、prototype binding report。
+5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。
 
 生成一个带真值数据的合成 benchmark：
 
