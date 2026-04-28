@@ -50,6 +50,10 @@ class PathTracingConfig:
     segment_short_length_threshold: int = 4
     segment_short_length_penalty: float = 0.0
     completed_point_confidence: float = 0.35
+    rebuild_low_coverage_paths: bool = True
+    rebuild_min_observed_pixels: int = 80
+    rebuild_max_coverage: float = 0.55
+    rebuild_min_x_span_gain: float = 1.15
 
 
 class LinePathExtractor:
@@ -97,6 +101,18 @@ class LinePathExtractor:
             ordered, completed_ranges = _trace_multi_component_path(selected_components, self.config)
         else:
             ordered = _trace_main_path(graph, endpoints)
+        completed_count = sum(max(0, end - start + 1) for start, end in completed_ranges)
+        observed_in_path = max(0, len(ordered) - completed_count)
+        coverage = observed_in_path / max(len(selected), 1)
+        warnings = []
+        if self.config.rebuild_low_coverage_paths:
+            rebuilt = _rebuild_low_coverage_path(ordered, selected, coverage, self.config)
+            if rebuilt is not None:
+                ordered, completed_ranges = rebuilt
+                warnings.append("path_rebuilt_from_skeleton_x_projection")
+                completed_count = sum(max(0, end - start + 1) for start, end in completed_ranges)
+                observed_in_path = max(0, len(ordered) - completed_count)
+                coverage = observed_in_path / max(len(selected), 1)
         path_points = [Point(float(x), float(y)) for x, y in ordered]
         point_confidences = _point_confidences(
             len(path_points), completed_ranges, self.config.completed_point_confidence
@@ -104,11 +120,7 @@ class LinePathExtractor:
         endpoint_points = [Point(float(x), float(y)) for x, y in endpoints]
         junction_points = [Point(float(x), float(y)) for x, y in junctions]
         length = _path_length(ordered)
-        completed_count = sum(max(0, end - start + 1) for start, end in completed_ranges)
-        observed_in_path = max(0, len(ordered) - completed_count)
-        coverage = observed_in_path / max(len(selected), 1)
         confidence = float(max(0.0, min(1.0, coverage)))
-        warnings = []
         if len(components) > 1:
             warnings.append(f"multiple_components={len(components)}")
             if not self.config.prefer_longest_component:
@@ -664,6 +676,68 @@ def _trace_multi_component_path(components: Sequence[Set[Pixel]], config: PathTr
             ordered.extend(path)
         previous_item = item
     return ordered, completed_ranges
+
+
+def _rebuild_low_coverage_path(
+    ordered: Sequence[Pixel],
+    selected: Set[Pixel],
+    coverage: float,
+    config: PathTracingConfig,
+) -> Optional[Tuple[List[Pixel], List[Tuple[int, int]]]]:
+    if not ordered or len(selected) < config.rebuild_min_observed_pixels:
+        return None
+    if coverage > config.rebuild_max_coverage:
+        return None
+    rebuilt = _compress_pixels_by_x(selected)
+    if _pixel_x_span(rebuilt) <= _pixel_x_span(ordered) * config.rebuild_min_x_span_gain:
+        return None
+    rebuilt, completed_ranges = _connect_rebuilt_projection_path(rebuilt, config)
+    return rebuilt, completed_ranges
+
+
+def _compress_pixels_by_x(pixels: Set[Pixel]) -> List[Pixel]:
+    grouped: Dict[int, List[int]] = {}
+    for x, y in pixels:
+        grouped.setdefault(int(x), []).append(int(y))
+    return [
+        (x, int(round(float(sum(ys)) / len(ys))))
+        for x, ys in sorted(grouped.items())
+    ]
+
+
+def _connect_rebuilt_projection_path(points: Sequence[Pixel], config: PathTracingConfig) -> Tuple[List[Pixel], List[Tuple[int, int]]]:
+    if len(points) < 2:
+        return list(points), []
+    connected: List[Pixel] = [points[0]]
+    completed_ranges: List[Tuple[int, int]] = []
+    previous_tangent = None
+    for idx, current in enumerate(points[1:], start=1):
+        previous = connected[-1]
+        next_tangent = None
+        if idx + 1 < len(points):
+            next_point = points[idx + 1]
+            next_tangent = (float(next_point[0] - current[0]), float(next_point[1] - current[1]))
+        gap = _interpolate_gap(
+            previous,
+            current,
+            config,
+            prev_tangent=previous_tangent,
+            next_tangent=next_tangent,
+        )
+        if gap:
+            start = len(connected)
+            connected.extend(gap)
+            completed_ranges.append((start, len(connected) - 1))
+        connected.append(current)
+        previous_tangent = (float(current[0] - previous[0]), float(current[1] - previous[1]))
+    return connected, completed_ranges
+
+
+def _pixel_x_span(points: Sequence[Pixel]) -> float:
+    if not points:
+        return 0.0
+    xs = [float(point[0]) for point in points]
+    return max(xs) - min(xs)
 
 
 def _order_segments(segments: List[Dict], config: PathTracingConfig) -> List[Dict]:

@@ -458,6 +458,13 @@ class GraphExtractionPipeline:
             for confidence in (path.confidence_per_point or [])
         ]
         low_confidence_points = sum(1 for confidence in confidence_values if confidence < 0.5)
+        path_coverage_values = [_curve_path_coverage_ratio(path) for path in curve_paths]
+        path_coverage_values = [value for value in path_coverage_values if value is not None]
+        rebuilt_path_count = sum(
+            1
+            for path in curve_paths
+            if "path_rebuilt_from_skeleton_x_projection" in path.warnings
+        )
         mask_by_id = {mask.curve_id: mask for mask in curve_masks}
         path_by_id = {path.curve_id: path for path in curve_paths}
         series_by_id = {series.curve_id: series for series in data_series}
@@ -513,6 +520,8 @@ class GraphExtractionPipeline:
                 "total_completed_point_count": completed_points,
                 "completed_point_ratio": _safe_ratio(completed_points, path_points),
                 "mean_path_confidence": _mean_values([path.confidence for path in curve_paths]),
+                "mean_path_coverage_ratio": _mean_values(path_coverage_values),
+                "rebuilt_path_count": rebuilt_path_count,
                 "low_confidence_point_count": low_confidence_points,
                 "low_confidence_point_ratio": _safe_ratio(low_confidence_points, len(confidence_values)),
             },
@@ -1369,6 +1378,8 @@ def _curve_quality_row(curve_id, mask, path, series):
         "path_point_count": point_count,
         "path_length_px": path.path_length_px if path else 0.0,
         "path_confidence": path.confidence if path else None,
+        "path_coverage_ratio": _curve_path_coverage_ratio(path) if path else None,
+        "path_rebuilt": bool(path and "path_rebuilt_from_skeleton_x_projection" in path.warnings),
         "completed_point_count": completed_count,
         "completed_point_ratio": _safe_ratio(completed_count, point_count),
         "low_confidence_point_ratio": _safe_ratio(
@@ -1379,6 +1390,13 @@ def _curve_quality_row(curve_id, mask, path, series):
         "data_completed_point_count": series.completed_point_count if series else 0,
         "warnings": (mask.warnings if mask else []) + (path.warnings if path else []) + (series.warnings if series else []),
     }
+
+
+def _curve_path_coverage_ratio(path):
+    if path is None or path.observed_pixel_count <= 0:
+        return None
+    observed_points = max(0, len(path.pixel_points_ordered) - int(path.completed_pixel_count or 0))
+    return _safe_ratio(observed_points, path.observed_pixel_count)
 
 
 def main() -> None:

@@ -20,6 +20,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 曲线 mask 生成：根据曲线颜色原型生成单曲线二值 mask，并支持图例区域排除。
 - Mask 清理：会过滤明显边框/网格残留，并保守移除紧贴边缘的极小刻度残片，避免破坏虚线和点线端点。
 - 骨架化与路径追踪：将 mask 转为中心线 skeleton，再生成有序像素路径。
+- 通用路径重建：当普通 `curve_path` 只覆盖少量 skeleton 像素且存在明显 junction 干扰时，`lines.py` 现可按整条 skeleton 的 x 投影重建更完整的中心线，并在 warnings 中标记 `path_rebuilt_from_skeleton_x_projection`。
 - 断裂补全记录：对虚线/点线等多连通片段执行基础 gap linking，并保存补全区间和点级置信度。
 - 图例污染回归测试：支持绘图区内图例合成场景，能量化排除图例前后的误差变化。
 - 图例 item 诊断解析：已能把检测到的 legend bbox 分块为若干 item，提取样本区域、文本区域、样本颜色和粗略线型，并输出 `debug/legend_items.png`。
@@ -36,6 +37,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 同灰线型实例诊断：已能把 `line_like` 组件按垂直轨迹分组为诊断级 `line_style_curve_instances`，并输出 `debug/line_style_curve_instances.png`；在 `same_gray_linestyle_curves` 中当前可作为图例顺序约束的实例级绑定目标，并可生成 prototype-bound path/data。
 - Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
 - Prototype-bound path/data 输出：当最佳绑定目标是 `curve`、`marker_instance` 或 `line_style_instance` 时，pipeline 都会生成 `prototype_bound_paths`；其中 direct curve 绑定会复用原始曲线路径，marker 绑定在可唯一回溯到源曲线时会优先复用连续线条 path，而不是只保留稀疏 marker 中心点。开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`，其中会保留图例标签字段。
+- 路径质量诊断：quality report 的 `path_summary` 与逐曲线 `curves[]` 现已增加 `mean_path_coverage_ratio` / `path_coverage_ratio` 和 `rebuilt_path_count` / `path_rebuilt`，可直接观察普通 path 是否因 marker junction 触发了重建。
 - 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
 
 当前固定 suite 的参考结果：
@@ -275,6 +277,16 @@ pixi run python -m graph2data.benchmark --case temp\binding_benchmark\same_gray_
 当前 `line_marker_curves` 诊断参考：
 
 ```text
+普通 path benchmark:
+curve_count = 4
+valid_curve_count = 4
+mean_chamfer_distance_px ≈ 1.36
+mean_data_y_rmse ≈ 0.012
+mean_data_x_coverage_ratio ≈ 0.97
+mean_path_coverage_ratio ≈ 0.93
+rebuilt_path_count 有结构化输出
+
+prototype-binding benchmark:
 legend_item_count = 4
 binding_accuracy ≈ 1.0
 prototype_bound_path_count ≈ 4
@@ -322,7 +334,7 @@ prototype_bound_path_summary.completed_point_ratio 有结构化输出
 binding_accuracy ≈ 1.0
 ```
 
-说明：`line_marker_curves` 已用于验证 direct curve prototype-bound 输出、标签传播和 CSV/data 一致性；`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
+说明：`line_marker_curves` 已用于验证普通 path 质量门、direct curve prototype-bound 输出、标签传播和 CSV/data 一致性；通用 path 提取已能在低覆盖 junction 场景下触发 skeleton x 投影重建。`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
 
 下一阶段验收标准：
 
@@ -443,7 +455,7 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 
 1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，并已打通可选 OCR 标签传播；下一步补强复杂图例文本语义和 marker 形状细分。
 2. 继续扩展 prototype-bound 输出：`line_marker_curves` 已验证 direct curve bound path、标签传播、data series 和 CSV 字段一致性；下一步继续覆盖更复杂的交叉线+marker 场景。
-3. 增强 `lines.py`：当前已在 prototype-bound curve path 中对 marker junction 导致的短路径进行 line-like component 重建；下一步把该策略前移到通用 path extraction。
+3. 增强 `lines.py`：marker junction 导致的短路径重建现已前移到通用 path extraction；下一步将当前 x 投影重建升级为更贴合局部曲率的路径拟合，而不只依赖逐 x 聚合中心线。
 4. 在 `pipeline.py` 中继续增加真实灰度图的诊断信息，重点解释同灰度曲线被合并或拆开的原因。
 5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。
 

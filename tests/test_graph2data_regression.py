@@ -8,7 +8,7 @@ import pytest
 import numpy as np
 import cv2
 
-from graph2data.benchmark import run_prototype_binding_benchmark, run_suite
+from graph2data.benchmark import run_path_benchmark, run_prototype_binding_benchmark, run_suite
 from graph2data.image_io import load_bgr
 from graph2data.instances import group_marker_curve_instances
 from graph2data.legend import LegendDetector
@@ -284,6 +284,23 @@ def test_path_extractor_keeps_dotted_curve_when_no_line_anchor_exists():
 
     assert path.component_count >= 8
     assert not any(warning.startswith("marker_like_components_skipped=") for warning in path.warnings)
+
+
+def test_path_extractor_rebuilds_low_coverage_marker_junction_path():
+    mask = np.zeros((120, 240), dtype=np.uint8)
+    cv2.line(mask, (10, 60), (230, 60), 255, 2)
+    for x in np.linspace(30, 210, 8).astype(int):
+        cv2.line(mask, (int(x), 15), (int(x), 105), 255, 2)
+
+    path = LinePathExtractor(PathTracingConfig()).extract_from_mask_image(
+        cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+        curve_id="line_marker",
+    )
+
+    assert "path_rebuilt_from_skeleton_x_projection" in path.warnings
+    xs = [point.x for point in path.pixel_points_ordered]
+    assert min(xs) <= 12
+    assert max(xs) >= 228
 
 
 def test_component_classifier_distinguishes_line_marker_and_noise():
@@ -980,6 +997,22 @@ def test_prototype_bound_line_style_paths_use_component_centers():
 
 
 def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
+    line_marker_path_manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "line_marker_path",
+        SyntheticConfig(seed=25, n_curves=4, line_marker_curves=True, legend_inside=False),
+    )
+    line_marker_path = run_path_benchmark(str(Path(line_marker_path_manifest["image_path"]).parent))
+    line_marker_path_summary = line_marker_path["summary"]
+    assert line_marker_path_summary["valid_curve_count"] == line_marker_path_summary["curve_count"]
+    assert line_marker_path_summary["mean_data_y_rmse"] is not None
+    assert line_marker_path_summary["mean_data_y_rmse"] < 0.03
+    assert line_marker_path_summary["mean_data_x_coverage_ratio"] is not None
+    assert line_marker_path_summary["mean_data_x_coverage_ratio"] > 0.95
+    assert line_marker_path_summary["mean_path_coverage_ratio"] is not None
+    assert line_marker_path_summary["mean_path_coverage_ratio"] > 0.75
+    assert line_marker_path_summary["rebuilt_path_count"] >= 0
+
     line_marker_manifest = generate_benchmark(
         str(tmp_path / "synthetic"),
         "line_marker_binding",

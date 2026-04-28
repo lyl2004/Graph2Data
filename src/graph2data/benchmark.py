@@ -70,6 +70,8 @@ def run_path_benchmark(case_dir: str) -> Dict:
         metrics = evaluate_curve_path(path_json, truth_axes, str(truth_data_path), curve_id)
         series = map_curve_path_to_data(path, plot_area, data_range_model)
         metrics.update(evaluate_data_series(to_serializable(series), str(truth_data_path), curve_id))
+        metrics["path_coverage_ratio"] = _path_coverage_ratio(path)
+        metrics["path_rebuilt"] = any("path_rebuilt_from_skeleton_x_projection" == warning for warning in path.warnings)
         curve_metrics.append(metrics)
 
     valid = [m for m in curve_metrics if m.get("path_success")]
@@ -87,6 +89,8 @@ def run_path_benchmark(case_dir: str) -> Dict:
         "mean_data_y_max_abs_error": _mean(valid, "data_y_max_abs_error"),
         "mean_data_r2_at_pred_x": _mean(valid, "data_r2_at_pred_x"),
         "mean_data_x_coverage_ratio": _mean(valid, "data_x_coverage_ratio"),
+        "mean_path_coverage_ratio": _mean(valid, "path_coverage_ratio"),
+        "rebuilt_path_count": sum(1 for metric in valid if metric.get("path_rebuilt")),
     }
     return {"summary": summary, "curves": curve_metrics}
 
@@ -882,6 +886,13 @@ def _mean_completed_point_ratio(rows: List[Dict]):
     if not ratios:
         return None
     return sum(ratios) / len(ratios)
+
+
+def _path_coverage_ratio(path) -> Optional[float]:
+    observed = int(getattr(path, "observed_pixel_count", 0) or 0)
+    completed = int(getattr(path, "completed_pixel_count", 0) or 0)
+    point_count = max(0, len(getattr(path, "pixel_points_ordered", []) or []) - completed)
+    return _safe_divide(point_count, observed)
 
 
 def _safe_divide(numerator: int, denominator: int) -> Optional[float]:
