@@ -32,6 +32,7 @@ from .models import to_serializable
 from .pipeline import (
     GraphExtractionPipeline,
     PipelineConfig,
+    _prototype_bound_curve_paths,
     _prototype_bound_line_style_paths,
     _prototype_bound_marker_paths,
     _score_prototype_bindings,
@@ -297,17 +298,26 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
     legend_detector = LegendDetector()
     legends = pipeline_result.legends or _synthetic_legend_detections(truth_axes, truth_curves)
     legend_items = legend_detector.extract_items(image, legends)
+    for idx, item in enumerate(legend_items):
+        if idx < len(truth_curves):
+            truth_curve = truth_curves[idx]
+            if item.label is None:
+                item.label = truth_curve.get("label")
+            item.line_style = _truth_line_style_label(truth_curve.get("linestyle"))
+            item.marker_style = "repeated_compact" if truth_curve.get("marker") else "unknown"
     visual_prototypes = legend_detector.visual_prototypes_from_items(legend_items)
 
     exclude_regions = [legend.bbox for legend in legends]
     curves = CurveColorExtractor(ColorExtractorConfig(min_ratio=0.0004)).extract(image, plot_bbox, exclude_regions=exclude_regions)
     mask_extractor = CurveMaskExtractor()
     path_extractor = LinePathExtractor()
+    curve_paths = []
     line_components = []
     marker_candidates = []
     for curve in curves:
         mask, _ = mask_extractor.extract_mask(image, curve, plot_bbox, exclude_regions=exclude_regions)
         mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        curve_paths.append(path_extractor.extract_from_mask_image(mask_bgr, curve_id=curve.curve_id))
         line_components.extend(path_extractor.classify_components_from_mask_image(mask_bgr, curve_id=curve.curve_id))
         marker_candidates.extend(path_extractor.detect_marker_candidates_from_mask_image(mask_bgr, curve_id=curve.curve_id))
     line_components = filter_border_line_components(line_components, plot_bbox)
@@ -338,6 +348,15 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
         visual_prototypes,
         prototype_bindings,
         marker_curve_instances,
+        curve_paths,
+    )
+    prototype_bound_paths.extend(
+        _prototype_bound_curve_paths(
+            visual_prototypes,
+            prototype_bindings,
+            curve_paths,
+            line_components,
+        )
     )
     prototype_bound_paths.extend(
         _prototype_bound_line_style_paths(
@@ -414,6 +433,10 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
         "evaluated_prototype_bound_path_count": len(bound_path_rows),
         "valid_prototype_bound_path_count": len(valid_bound_paths),
         "valid_prototype_bound_data_count": len(valid_bound_data),
+        "labeled_legend_item_count": sum(1 for item in legend_items if item.label),
+        "labeled_prototype_count": sum(1 for prototype in visual_prototypes if prototype.label),
+        "labeled_prototype_bound_path_count": sum(1 for path in prototype_bound_paths if path.label),
+        "labeled_prototype_bound_data_count": sum(1 for row in valid_bound_data if row.get("label")),
         "mean_prototype_bound_chamfer_distance_px": _mean(valid_bound_paths, "chamfer_distance_px"),
         "mean_prototype_bound_hausdorff_distance_px": _mean(valid_bound_paths, "hausdorff_distance_px"),
         "mean_prototype_bound_completed_point_ratio": _mean_completed_point_ratio(valid_bound_paths),
@@ -434,7 +457,12 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
             "warnings": pipeline_result.warnings,
             "legend_items": [to_serializable(item) for item in legend_items],
             "prototype_bindings": [to_serializable(binding) for binding in prototype_bindings],
+            "curve_paths": [to_serializable(path) for path in curve_paths],
             "line_style_curve_instances": [to_serializable(instance) for instance in line_style_curve_instances],
+            "prototype_bound_data_series": [
+                to_serializable(map_curve_path_to_data(path, plot_area, data_range_model))
+                for path in prototype_bound_paths
+            ],
             "prototype_bound_paths": [to_serializable(path) for path in prototype_bound_paths],
         },
     }
@@ -471,6 +499,17 @@ def _synthetic_legend_detections(truth_axes: Dict, truth_curves: List[Dict]) -> 
         )
         for bbox in _synthetic_legend_exclusions(truth_axes, truth_curves)
     ]
+
+
+def _truth_line_style_label(value) -> str:
+    text = str(value)
+    if text in {"-", "solid"}:
+        return "solid"
+    if text in {"--", "-.", "dashed"} or "5, 1" in text:
+        return "dashed"
+    if text in {":", "dotted"} or "1, 1" in text:
+        return "dotted"
+    return "unknown"
 
 
 def _match_prototype(hex_color: str, prototypes: List[CurvePrototype]) -> Optional[CurvePrototype]:
@@ -561,6 +600,7 @@ def _evaluate_prototype_bound_paths(
         metrics.update(evaluate_data_series(to_serializable(series), str(truth_data_path), expected_curve_id))
         metrics["prototype_bound_path_id"] = path.curve_id
         metrics["expected_curve_id"] = expected_curve_id
+        metrics["label"] = path.label
         rows.append(metrics)
     return rows
 

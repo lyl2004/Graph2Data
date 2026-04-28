@@ -23,8 +23,8 @@ from graph2data.lines import (
 )
 from graph2data.mapping import map_curve_path_to_data, map_curve_paths_to_data, write_data_series_csv
 from graph2data.masks import _filter_components
-from graph2data.models import BoundingBox, CurvePath, CurveVisualPrototype, DataRange, LegendItem, LineStyleCurveInstance, MarkerCurveInstance, OCRTextBox, PlotArea, Point, PrototypeBinding
-from graph2data.pipeline import _prototype_bound_line_style_paths, _prototype_bound_marker_paths
+from graph2data.models import BoundingBox, CurvePath, CurveVisualPrototype, DataRange, LegendItem, LineComponentClassification, LineStyleCurveInstance, MarkerCurveInstance, OCRTextBox, PlotArea, Point, PrototypeBinding
+from graph2data.pipeline import _prototype_bound_curve_paths, _prototype_bound_line_style_paths, _prototype_bound_marker_paths
 from graph2data.pipeline import GraphExtractionPipeline, PipelineConfig
 from graph2data.quality import evaluate_data_series
 from graph2data.synthetic import SyntheticConfig, generate_benchmark
@@ -478,6 +478,7 @@ def test_legend_item_labels_are_assigned_from_ocr_text_boxes():
 def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
     cases = {
         "marker_curves": SyntheticConfig(seed=21, n_curves=4, marker_curves=True),
+        "line_marker_curves": SyntheticConfig(seed=25, n_curves=4, line_marker_curves=True),
         "same_color_marker_curves": SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True),
         "same_gray_linestyle_curves": SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True),
         "dense_legend_curves": SyntheticConfig(seed=24, n_curves=10, dense_legend_curves=True),
@@ -497,6 +498,10 @@ def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
         if name == "marker_curves":
             assert all(curve["linestyle"] == "None" for curve in curves)
             assert len({curve["marker"] for curve in curves}) == len(curves)
+        if name == "line_marker_curves":
+            assert all(curve["linestyle"] == "-" for curve in curves)
+            assert all(curve["marker"] for curve in curves)
+            assert len({curve["color"] for curve in curves}) == len(curves)
         if name == "same_color_marker_curves":
             assert len({curve["color"] for curve in curves}) == 1
             assert len({curve["marker"] for curve in curves}) == len(curves)
@@ -772,16 +777,121 @@ def test_pipeline_outputs_prototype_bound_marker_paths(tmp_path):
         confidence=0.85,
     )
 
-    paths = _prototype_bound_marker_paths([prototype], [binding], [instance])
+    source_curve_path = CurvePath(
+        curve_id="curve_color_0",
+        pixel_points_ordered=[Point(10, 70), Point(20, 60), Point(30, 50), Point(40, 40)],
+        confidence_per_point=[0.9, 0.9, 0.9, 0.9],
+        endpoints=[Point(10, 70), Point(40, 40)],
+        component_count=1,
+        observed_pixel_count=4,
+        path_length_px=42.0,
+        confidence=0.88,
+    )
+
+    paths = _prototype_bound_marker_paths([prototype], [binding], [instance], [source_curve_path])
 
     assert len(paths) == 1
     path = paths[0]
     assert path.curve_id == "legend_proto_00_bound_path"
     assert path.label == "Marker Curve"
-    assert [(point.x, point.y) for point in path.pixel_points_ordered] == [(10, 70), (20, 60), (30, 50)]
-    assert path.observed_pixel_count == 3
+    assert [(point.x, point.y) for point in path.pixel_points_ordered] == [(10, 70), (20, 60), (30, 50), (40, 40)]
+    assert path.observed_pixel_count == 4
     assert path.confidence == pytest.approx(0.8)
     assert "prototype_bound_marker_path" in path.warnings
+    assert "marker_path_uses_source_curve_path" in path.warnings
+
+
+def test_pipeline_outputs_prototype_bound_curve_paths():
+    prototype = CurveVisualPrototype(
+        prototype_id="legend_proto_02",
+        legend_item_id="legend_00_item_02",
+        label="Curve Path",
+        confidence=0.9,
+    )
+    source_curve_path = CurvePath(
+        curve_id="curve_color_2",
+        pixel_points_ordered=[Point(15, 80), Point(25, 70), Point(35, 60)],
+        completed_ranges=[(1, 1)],
+        confidence_per_point=[0.95, 0.4, 0.95],
+        endpoints=[Point(15, 80), Point(35, 60)],
+        component_count=1,
+        observed_pixel_count=2,
+        completed_pixel_count=1,
+        path_length_px=28.0,
+        confidence=0.86,
+    )
+    binding = PrototypeBinding(
+        binding_id="binding_0002",
+        prototype_id=prototype.prototype_id,
+        legend_item_id=prototype.legend_item_id,
+        target_curve_id="curve_color_2",
+        target_type="curve",
+        score=0.97,
+        confidence=0.83,
+    )
+
+    paths = _prototype_bound_curve_paths([prototype], [binding], [source_curve_path])
+
+    assert len(paths) == 1
+    path = paths[0]
+    assert path.curve_id == "legend_proto_02_bound_path"
+    assert path.label == "Curve Path"
+    assert [(point.x, point.y) for point in path.pixel_points_ordered] == [(15, 80), (25, 70), (35, 60)]
+    assert path.completed_ranges == [(1, 1)]
+    assert path.completed_pixel_count == 1
+    assert path.confidence_per_point == [0.95, 0.4, 0.95]
+    assert "prototype_bound_curve_path" in path.warnings
+
+
+def test_prototype_bound_curve_path_rebuilds_from_line_components_when_source_path_is_short():
+    prototype = CurveVisualPrototype(
+        prototype_id="legend_proto_03",
+        legend_item_id="legend_00_item_03",
+        label="Rebuilt Curve",
+        confidence=0.9,
+    )
+    source_curve_path = CurvePath(
+        curve_id="curve_color_3",
+        pixel_points_ordered=[Point(10, 80), Point(20, 78)],
+        confidence_per_point=[0.7, 0.7],
+        endpoints=[Point(10, 80), Point(20, 78)],
+        component_count=1,
+        observed_pixel_count=100,
+        path_length_px=10.0,
+        confidence=0.7,
+    )
+    line_component = LineComponentClassification(
+        curve_id="curve_color_3",
+        component_id="component_00",
+        class_label="line_like",
+        bbox=BoundingBox(10, 70, 110, 82),
+        pixel_count=120,
+        width=100,
+        height=12,
+        max_span=100,
+        aspect_ratio=100 / 12,
+        path_points=[Point(x, 80 - x * 0.1) for x in range(10, 111, 10)],
+        path_length_px=100,
+        confidence=0.8,
+    )
+    binding = PrototypeBinding(
+        binding_id="binding_0003",
+        prototype_id=prototype.prototype_id,
+        legend_item_id=prototype.legend_item_id,
+        target_curve_id="curve_color_3",
+        target_type="curve",
+        score=0.97,
+        confidence=0.83,
+    )
+
+    paths = _prototype_bound_curve_paths([prototype], [binding], [source_curve_path], [line_component])
+
+    assert len(paths) == 1
+    path = paths[0]
+    assert len(path.pixel_points_ordered) > len(source_curve_path.pixel_points_ordered)
+    assert path.observed_pixel_count == len(line_component.path_points)
+    assert path.path_length_px > source_curve_path.path_length_px
+    assert "curve_path_rebuilt_from_line_components" in path.warnings
 
 
 def test_pipeline_maps_prototype_bound_marker_paths_to_data(tmp_path):
@@ -870,6 +980,33 @@ def test_prototype_bound_line_style_paths_use_component_centers():
 
 
 def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
+    line_marker_manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "line_marker_binding",
+        SyntheticConfig(seed=25, n_curves=4, line_marker_curves=True, legend_inside=True),
+    )
+    line_marker_result = run_prototype_binding_benchmark(str(Path(line_marker_manifest["image_path"]).parent))
+    line_marker_summary = line_marker_result["summary"]
+    assert line_marker_summary["legend_item_count"] == line_marker_summary["curve_count"]
+    assert line_marker_summary["curve_visual_prototype_count"] == line_marker_summary["curve_count"]
+    assert line_marker_summary["binding_accuracy"] is not None
+    assert line_marker_summary["binding_accuracy"] >= 0.75
+    assert line_marker_summary["prototype_bound_path_count"] >= line_marker_summary["curve_count"]
+    assert line_marker_summary["valid_prototype_bound_path_count"] >= line_marker_summary["curve_count"]
+    assert line_marker_summary["valid_prototype_bound_data_count"] >= line_marker_summary["curve_count"]
+    assert line_marker_summary["labeled_prototype_bound_path_count"] >= line_marker_summary["curve_count"]
+    assert line_marker_summary["labeled_prototype_bound_data_count"] >= line_marker_summary["curve_count"]
+    assert line_marker_summary["mean_prototype_bound_data_y_rmse"] is not None
+    assert line_marker_summary["mean_prototype_bound_data_y_rmse"] < 0.08
+    assert line_marker_summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
+    assert line_marker_summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.90
+    assert all(path["label"] for path in line_marker_result["pipeline"]["prototype_bound_paths"])
+    assert all(series["label"] for series in line_marker_result["pipeline"]["prototype_bound_data_series"])
+    assert any(
+        "prototype_bound_curve_path" in path["warnings"] or "marker_path_uses_source_curve_path" in path["warnings"]
+        for path in line_marker_result["pipeline"]["prototype_bound_paths"]
+    )
+
     manifest = generate_benchmark(
         str(tmp_path / "synthetic"),
         "same_color_marker_binding",

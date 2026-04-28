@@ -27,7 +27,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 图例 item 行数修正：synthetic 图例底部残留行已在 row 分块阶段过滤；`same_color_marker_curves` 的 legend item 数现与 4 条 truth 曲线对齐，`same_gray_linestyle_curves` 的 legend item 数现与 6 条 truth 曲线对齐。
 - 同灰线型重大修正：`line_style_instance` 当前已加入局部 x-neighborhood rank 分组、组件级 skeleton 主路径拼接和实例内 y 离群组件裁剪；prototype-bound path 的 RMSE / coverage 已进入稳定区间。
 - 同灰线型连续化节点：prototype-bound line-style path 当前会用方向、y 跳变和局部切线约束筛选可连接的 dash/dot gap，执行低置信度 gap interpolation；补全点写入 `completed_ranges` 并以较低点级置信度导出，debug overlay 会用不同颜色显示低置信度补全段。
-- 下一阶段 synthetic 场景：已支持 `marker_curves`、`same_color_marker_curves`、`same_gray_linestyle_curves`、`dense_legend_curves` 生成，用于后续 marker/线型分离和图例绑定实验。
+- 下一阶段 synthetic 场景：已支持 `marker_curves`、`line_marker_curves`、`same_color_marker_curves`、`same_gray_linestyle_curves`、`dense_legend_curves` 生成，用于后续 marker/线型分离和图例绑定实验。
 - 组件分类诊断：已能把每条 mask 的 skeleton 连通组件分类为 `line_like`、`marker_like` 或 `noise`，输出结构化 `line_components`、质量报告 `component_summary` 和 `debug/component_classification.png`。
 - Marker 候选诊断：已能从原始 mask 连通组件中提取 marker 候选中心点、bbox、填充率、圆度和粗略形状，输出结构化 `marker_candidates`、质量报告 `marker_summary` 和 `debug/marker_candidates.png`。
 - 线+marker 局部分离：marker 候选检测已加入距离变换局部 blob 检测，可从与线条相连的 marker 中恢复候选中心点；`same_color_marker_curves` 的 marker candidate recall 已从 0 提升到约 0.94。
@@ -35,7 +35,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - Marker 曲线实例输出：pipeline 已输出诊断级 `marker_curve_instances`，并生成 `debug/marker_curve_instances.png`；当前实例基于 marker 中心分组，并可为成功绑定到 marker 实例的图例 prototype 生成 `prototype_bound_paths`；已加入保守过滤，避免 `same_gray_linestyle_curves` 中的虚线/点线碎片被当成 marker 实例抢走绑定。
 - 同灰线型实例诊断：已能把 `line_like` 组件按垂直轨迹分组为诊断级 `line_style_curve_instances`，并输出 `debug/line_style_curve_instances.png`；在 `same_gray_linestyle_curves` 中当前可作为图例顺序约束的实例级绑定目标，并可生成 prototype-bound path/data。
 - Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
-- Prototype-bound path/data 输出：当最佳绑定目标是 `marker_instance` 或 `line_style_instance` 时，pipeline 会按 marker 中心点或线段组件中心点生成 `prototype_bound_paths`，并输出 `debug/prototype_bound_paths.png`；开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`，其中会保留图例标签字段。
+- Prototype-bound path/data 输出：当最佳绑定目标是 `curve`、`marker_instance` 或 `line_style_instance` 时，pipeline 都会生成 `prototype_bound_paths`；其中 direct curve 绑定会复用原始曲线路径，marker 绑定在可唯一回溯到源曲线时会优先复用连续线条 path，而不是只保留稀疏 marker 中心点。开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`，其中会保留图例标签字段。
 - 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
 
 当前固定 suite 的参考结果：
@@ -218,6 +218,7 @@ temp/stage_demo_artifacts/quality/report.json
 4. Benchmark 扩展与质量门
    - 在 `synthetic.py` 中新增下一阶段固定场景：
      - `marker_curves`          已可生成
+     - `line_marker_curves`     已可生成
      - `same_color_marker_curves` 已可生成
      - `same_gray_linestyle_curves` 已可生成
      - `dense_legend_curves`    已可生成
@@ -230,6 +231,8 @@ temp/stage_demo_artifacts/quality/report.json
      - `marker_candidate_recall`
      - `marker_candidate_precision`
      - `marker_group_assignment_accuracy`
+     - `labeled_prototype_bound_path_count`
+     - `labeled_prototype_bound_data_count`
    - 后续继续补：
      - 同色/同灰曲线实例分离准确率
    - pytest 中新增小而稳定的单元测试，先覆盖图例 item 分解和 marker/line 组件分类。
@@ -262,8 +265,24 @@ $env:PYTHONPATH='src'
 pixi run python -m graph2data.synthetic --out temp\binding_benchmark --name same_color_marker_curves --same_color_marker_curves --legend_inside --curves 4
 pixi run python -m graph2data.benchmark --case temp\binding_benchmark\same_color_marker_curves --mode prototype-binding --out temp\binding_benchmark\same_color_marker_binding.json
 
+pixi run python -m graph2data.synthetic --out temp\binding_benchmark --name line_marker_curves --line_marker_curves --legend_inside --curves 4
+pixi run python -m graph2data.benchmark --case temp\binding_benchmark\line_marker_curves --mode prototype-binding --out temp\binding_benchmark\line_marker_binding.json
+
 pixi run python -m graph2data.synthetic --out temp\binding_benchmark --name same_gray_linestyle_curves --same_gray_linestyle_curves --legend_inside --curves 6
 pixi run python -m graph2data.benchmark --case temp\binding_benchmark\same_gray_linestyle_curves --mode prototype-binding --out temp\binding_benchmark\same_gray_binding.json
+```
+
+当前 `line_marker_curves` 诊断参考：
+
+```text
+legend_item_count = 4
+binding_accuracy ≈ 1.0
+prototype_bound_path_count ≈ 4
+valid_prototype_bound_path_count ≈ 4
+valid_prototype_bound_data_count ≈ 4
+labeled_prototype_bound_path_count ≈ 4
+mean_prototype_bound_data_y_rmse ≈ 0.010
+mean_prototype_bound_data_x_coverage_ratio ≈ 0.99
 ```
 
 当前 `same_color_marker_curves` 诊断参考：
@@ -303,7 +322,7 @@ prototype_bound_path_summary.completed_point_ratio 有结构化输出
 binding_accuracy ≈ 1.0
 ```
 
-说明：`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间；gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
+说明：`line_marker_curves` 已用于验证 direct curve prototype-bound 输出、标签传播和 CSV/data 一致性；`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
 
 下一阶段验收标准：
 
@@ -423,8 +442,8 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 当前下一步工程任务：
 
 1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，并已打通可选 OCR 标签传播；下一步补强复杂图例文本语义和 marker 形状细分。
-2. 继续扩展 prototype-bound 输出：在更多线+marker 混合场景中验证 label、path、data、CSV 的一致性。
-3. 增强 `lines.py`：把 marker-like / line-like 组件诊断进一步用于实例级 mask/path 重建，而不只作为报告输出。
+2. 继续扩展 prototype-bound 输出：`line_marker_curves` 已验证 direct curve bound path、标签传播、data series 和 CSV 字段一致性；下一步继续覆盖更复杂的交叉线+marker 场景。
+3. 增强 `lines.py`：当前已在 prototype-bound curve path 中对 marker junction 导致的短路径进行 line-like component 重建；下一步把该策略前移到通用 path extraction。
 4. 在 `pipeline.py` 中继续增加真实灰度图的诊断信息，重点解释同灰度曲线被合并或拆开的原因。
 5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。
 

@@ -149,6 +149,15 @@ class GraphExtractionPipeline:
                     curve_visual_prototypes,
                     prototype_bindings,
                     marker_curve_instances,
+                    curve_paths,
+                )
+                prototype_bound_paths.extend(
+                    _prototype_bound_curve_paths(
+                        curve_visual_prototypes,
+                        prototype_bindings,
+                        curve_paths,
+                        line_components,
+                    )
                 )
                 prototype_bound_paths.extend(
                     _prototype_bound_line_style_paths(
@@ -720,10 +729,123 @@ def _prototype_bound_path_summary(prototype_bound_paths):
     }
 
 
-def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_curve_instances):
+def _prototype_bound_curve_paths(visual_prototypes, prototype_bindings, curve_paths, line_components=None):
+    if not visual_prototypes or not prototype_bindings or not curve_paths:
+        return []
+    curve_path_by_id = {path.curve_id: path for path in curve_paths}
+    line_components = list(line_components or [])
+    best_by_prototype = {}
+    for binding in prototype_bindings:
+        current = best_by_prototype.get(binding.prototype_id)
+        if current is None or binding.score > current.score:
+            best_by_prototype[binding.prototype_id] = binding
+
+    paths = []
+    used_curve_ids = set()
+    for prototype in visual_prototypes:
+        binding = best_by_prototype.get(prototype.prototype_id)
+        if binding is None or binding.target_type != "curve":
+            continue
+        if binding.target_curve_id in used_curve_ids:
+            continue
+        source = curve_path_by_id.get(binding.target_curve_id)
+        if source is None or not source.pixel_points_ordered:
+            continue
+        used_curve_ids.add(binding.target_curve_id)
+        confidence = min(float(binding.confidence), float(source.confidence), float(prototype.confidence))
+        points = list(source.pixel_points_ordered)
+        completed_ranges = list(source.completed_ranges)
+        confidence_per_point = list(source.confidence_per_point) or [confidence for _ in source.pixel_points_ordered]
+        endpoints = list(source.endpoints)
+        junctions = list(source.junctions)
+        component_count = source.component_count
+        observed_pixel_count = source.observed_pixel_count
+        completed_pixel_count = source.completed_pixel_count
+        path_length_px = source.path_length_px
+        warnings = [
+            f"prototype_id={prototype.prototype_id}",
+            f"legend_item_id={prototype.legend_item_id}",
+            f"binding_id={binding.binding_id}",
+            f"target_curve={source.curve_id}",
+            "prototype_bound_curve_path",
+        ]
+        rebuilt = _rebuild_curve_path_from_line_components(source, line_components, confidence)
+        if rebuilt is not None:
+            (
+                points,
+                completed_ranges,
+                confidence_per_point,
+                endpoints,
+                component_count,
+                observed_pixel_count,
+                completed_pixel_count,
+                path_length_px,
+            ) = rebuilt
+            warnings.append("curve_path_rebuilt_from_line_components")
+        paths.append(
+            CurvePath(
+                curve_id=f"{prototype.prototype_id}_bound_path",
+                pixel_points_ordered=points,
+                label=prototype.label,
+                completed_ranges=completed_ranges,
+                confidence_per_point=confidence_per_point,
+                endpoints=endpoints,
+                junctions=junctions,
+                component_count=component_count,
+                observed_pixel_count=observed_pixel_count,
+                completed_pixel_count=completed_pixel_count,
+                path_length_px=path_length_px,
+                confidence=confidence,
+                warnings=warnings + list(binding.warnings) + list(source.warnings),
+            )
+        )
+    return paths
+
+
+def _rebuild_curve_path_from_line_components(source_path, line_components, confidence):
+    if not line_components or not source_path.pixel_points_ordered:
+        return None
+    source_points = list(source_path.pixel_points_ordered)
+    observed_count = max(int(source_path.observed_pixel_count or 0), len(source_points))
+    if observed_count <= 0 or len(source_points) / observed_count >= 0.55:
+        return None
+    components = [
+        component
+        for component in line_components
+        if component.curve_id == source_path.curve_id and component.class_label == "line_like" and component.path_points
+    ]
+    if not components:
+        return None
+    observed_points = []
+    for component in components:
+        observed_points.extend(component.path_points)
+    observed_points = _compress_line_style_points(sorted(observed_points, key=lambda point: (point.x, point.y)))
+    if _point_x_span(observed_points) <= _point_x_span(source_points) * 1.15:
+        return None
+    points, completed_ranges, _ = _connect_line_style_points(observed_points)
+    if len(points) <= len(source_points):
+        return None
+    completed_pixel_count = sum(max(0, end - start + 1) for start, end in completed_ranges)
+    return (
+        points,
+        completed_ranges,
+        _line_style_point_confidences(len(points), completed_ranges, confidence),
+        [points[0], points[-1]] if len(points) >= 2 else list(points),
+        len(components),
+        len(observed_points),
+        completed_pixel_count,
+        _point_path_length(points),
+    )
+
+
+def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_curve_instances, curve_paths=None):
     if not visual_prototypes or not prototype_bindings or not marker_curve_instances:
         return []
     marker_by_id = {instance.instance_id: instance for instance in marker_curve_instances}
+    source_path_by_id = {path.curve_id: path for path in (curve_paths or [])}
+    marker_instance_count_by_source = {}
+    for instance in marker_curve_instances:
+        marker_instance_count_by_source[instance.source_curve_id] = marker_instance_count_by_source.get(instance.source_curve_id, 0) + 1
     best_by_prototype = {}
     for binding in prototype_bindings:
         current = best_by_prototype.get(binding.prototype_id)
@@ -742,8 +864,10 @@ def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_
         if instance is None or not instance.points:
             continue
         used_marker_instance_ids.add(binding.target_curve_id)
-        points = sorted(instance.points, key=lambda point: (point.x, point.y))
         confidence = min(float(binding.confidence), float(instance.confidence), float(prototype.confidence))
+        source_path = None
+        if marker_instance_count_by_source.get(instance.source_curve_id) == 1:
+            source_path = source_path_by_id.get(instance.source_curve_id)
         warnings = [
             f"prototype_id={prototype.prototype_id}",
             f"legend_item_id={prototype.legend_item_id}",
@@ -751,18 +875,45 @@ def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_
             f"target_marker_instance={instance.instance_id}",
             "prototype_bound_marker_path",
         ]
+        if source_path is not None and source_path.pixel_points_ordered:
+            points = list(source_path.pixel_points_ordered)
+            confidence = min(confidence, float(source_path.confidence))
+            warnings.append("marker_path_uses_source_curve_path")
+            completed_ranges = list(source_path.completed_ranges)
+            confidence_per_point = list(source_path.confidence_per_point) or [confidence for _ in points]
+            endpoints = list(source_path.endpoints)
+            junctions = list(source_path.junctions)
+            component_count = source_path.component_count
+            observed_pixel_count = source_path.observed_pixel_count
+            completed_pixel_count = source_path.completed_pixel_count
+            path_length_px = source_path.path_length_px
+            source_warnings = list(source_path.warnings)
+        else:
+            points = sorted(instance.points, key=lambda point: (point.x, point.y))
+            completed_ranges = []
+            confidence_per_point = [confidence for _ in points]
+            endpoints = [points[0], points[-1]] if len(points) >= 2 else list(points)
+            junctions = []
+            component_count = 1
+            observed_pixel_count = len(points)
+            completed_pixel_count = 0
+            path_length_px = _point_path_length(points)
+            source_warnings = []
         paths.append(
             CurvePath(
                 curve_id=f"{prototype.prototype_id}_bound_path",
                 pixel_points_ordered=points,
                 label=prototype.label,
-                confidence_per_point=[confidence for _ in points],
-                endpoints=[points[0], points[-1]] if len(points) >= 2 else list(points),
-                component_count=1,
-                observed_pixel_count=len(points),
-                path_length_px=_point_path_length(points),
+                completed_ranges=completed_ranges,
+                confidence_per_point=confidence_per_point,
+                endpoints=endpoints,
+                junctions=junctions,
+                component_count=component_count,
+                observed_pixel_count=observed_pixel_count,
+                completed_pixel_count=completed_pixel_count,
+                path_length_px=path_length_px,
                 confidence=confidence,
-                warnings=warnings + list(binding.warnings) + list(instance.warnings),
+                warnings=warnings + list(binding.warnings) + list(instance.warnings) + source_warnings,
             )
         )
     return paths
@@ -967,6 +1118,12 @@ def _score_prototype_bindings(
                 warnings.append("missing_marker_similarity")
 
             score = sum(score_parts) / max(sum(weights), 1e-9)
+            if proto.rgb is not None and _is_achromatic_rgb(proto.rgb) and proto.line_style != "unknown" and proto.marker_style == "unknown":
+                score *= 0.75
+                warnings.append("achromatic_line_style_prototype_penalizes_direct_curve")
+            if getattr(curve, "confidence", 1.0) < 0.8:
+                score *= max(0.25, float(curve.confidence))
+                warnings.append("low_curve_prototype_confidence")
             if proto.marker_style == "unknown":
                 warnings.append("prototype_marker_unknown")
             bindings.append(
@@ -1018,6 +1175,12 @@ def _score_prototype_bindings(
                 warnings.append("prototype_line_style_unknown")
             if instance.estimated_line_style == "unknown":
                 warnings.append("line_instance_style_unknown")
+            if proto.marker_style != "unknown":
+                score *= 0.80
+                warnings.append("marker_prototype_penalizes_line_style_instance")
+            if proto.rgb is not None and not _is_achromatic_rgb(proto.rgb):
+                score *= 0.70
+                warnings.append("color_prototype_penalizes_line_style_instance")
             bindings.append(
                 PrototypeBinding(
                     binding_id=f"binding_{len(bindings):04d}",
@@ -1099,6 +1262,13 @@ def _line_style_instance_similarity(prototype_style, instance_style):
     return 0.35
 
 
+def _is_achromatic_rgb(rgb, tolerance=18.0):
+    if rgb is None:
+        return False
+    r, g, b = [float(value) for value in rgb]
+    return max(abs(r - g), abs(r - b), abs(g - b)) <= tolerance
+
+
 def _ordinal_similarity(proto_idx, instance_idx, prototype_count, instance_count):
     if prototype_count <= 1 or instance_count <= 1:
         return 0.5
@@ -1173,6 +1343,13 @@ def _point_path_length(points):
     for a, b in zip(points, points[1:]):
         total += ((float(a.x) - float(b.x)) ** 2 + (float(a.y) - float(b.y)) ** 2) ** 0.5
     return float(total)
+
+
+def _point_x_span(points):
+    if not points:
+        return 0.0
+    xs = [float(point.x) for point in points]
+    return max(xs) - min(xs)
 
 
 def _mean_values(values: Sequence[float]):

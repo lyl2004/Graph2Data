@@ -60,6 +60,7 @@ class SyntheticConfig:
     occlusion_width: float = 0.55
     crossing_curves: bool = False
     marker_curves: bool = False
+    line_marker_curves: bool = False
     same_color_marker_curves: bool = False
     same_gray_linestyle_curves: bool = False
     dense_legend_curves: bool = False
@@ -105,7 +106,7 @@ def generate_curve_family(config: SyntheticConfig) -> Tuple[np.ndarray, List[np.
                 "linestyle": linestyle,
                 "marker": marker,
                 "marker_every": marker_every,
-                "marker_size": 4.0 if marker else 0.0,
+                "marker_size": 3.0 if marker and config.line_marker_curves else (4.0 if marker else 0.0),
                 "label": f"Curve {idx + 1}",
             }
         )
@@ -255,6 +256,10 @@ def _visual_style_for_curve(idx: int, config: SyntheticConfig) -> Tuple[str, str
         marker = MARKER_STYLES[idx % len(MARKER_STYLES)]
         linestyle = "None"
         marker_every = 35
+    if config.line_marker_curves:
+        marker = MARKER_STYLES[idx % len(MARKER_STYLES)]
+        linestyle = "-"
+        marker_every = 45
     if config.same_color_marker_curves:
         color = "#555555"
         linestyle = "-"
@@ -291,6 +296,8 @@ def _plot_kwargs(meta: Dict, mask: bool) -> Dict:
 def _case_title(config: SyntheticConfig) -> str:
     if config.marker_curves:
         return "Marker Curves"
+    if config.line_marker_curves:
+        return "Line Marker Curves"
     if config.same_color_marker_curves:
         return "Same Color Marker Curves"
     if config.same_gray_linestyle_curves:
@@ -348,6 +355,7 @@ def main() -> None:
     parser.add_argument("--local_occlusion", action="store_true", help="Remove short curve spans from rendered image/masks while keeping full truth data")
     parser.add_argument("--crossing_curves", action="store_true", help="Generate curves that lightly cross in the plot area")
     parser.add_argument("--marker_curves", action="store_true", help="Generate pure marker curves without connecting lines")
+    parser.add_argument("--line_marker_curves", action="store_true", help="Generate colored line curves with visible markers")
     parser.add_argument("--same_color_marker_curves", action="store_true", help="Generate curves with the same color but different markers")
     parser.add_argument("--same_gray_linestyle_curves", action="store_true", help="Generate gray curves distinguished mainly by line style")
     parser.add_argument("--dense_legend_curves", action="store_true", help="Generate a dense in-plot legend with at least ten curves")
@@ -365,6 +373,7 @@ def main() -> None:
             local_occlusion=args.local_occlusion,
             crossing_curves=args.crossing_curves,
             marker_curves=args.marker_curves,
+            line_marker_curves=args.line_marker_curves,
             same_color_marker_curves=args.same_color_marker_curves,
             same_gray_linestyle_curves=args.same_gray_linestyle_curves,
             dense_legend_curves=args.dense_legend_curves,
