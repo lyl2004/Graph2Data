@@ -20,6 +20,7 @@ from graph2data.lines import (
     _order_segments,
     _prune_short_spurs,
     _segment_connection_cost,
+    _smooth_projection_path,
 )
 from graph2data.mapping import map_curve_path_to_data, map_curve_paths_to_data, write_data_series_csv
 from graph2data.masks import _filter_components
@@ -303,6 +304,16 @@ def test_path_extractor_rebuilds_low_coverage_marker_junction_path():
     assert max(xs) >= 228
 
 
+def test_projection_path_smoothing_reduces_local_jitter():
+    jagged = [(idx, 50 + (8 if idx % 2 else -8)) for idx in range(20)]
+    smoothed = _smooth_projection_path(jagged, window_px=3)
+
+    raw_jump = max(abs(a[1] - b[1]) for a, b in zip(jagged, jagged[1:]))
+    smooth_jump = max(abs(a[1] - b[1]) for a, b in zip(smoothed, smoothed[1:]))
+    assert smooth_jump < raw_jump
+    assert [point[0] for point in smoothed] == [point[0] for point in jagged]
+
+
 def test_component_classifier_distinguishes_line_marker_and_noise():
     mask = np.zeros((90, 180), dtype=np.uint8)
     cv2.line(mask, (10, 45), (150, 45), 255, 3)
@@ -496,6 +507,8 @@ def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
     cases = {
         "marker_curves": SyntheticConfig(seed=21, n_curves=4, marker_curves=True),
         "line_marker_curves": SyntheticConfig(seed=25, n_curves=4, line_marker_curves=True),
+        "crossing_line_marker_curves": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True),
+        "same_color_line_marker_curves": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True),
         "same_color_marker_curves": SyntheticConfig(seed=22, n_curves=4, same_color_marker_curves=True),
         "same_gray_linestyle_curves": SyntheticConfig(seed=23, n_curves=6, same_gray_linestyle_curves=True),
         "dense_legend_curves": SyntheticConfig(seed=24, n_curves=10, dense_legend_curves=True),
@@ -519,6 +532,18 @@ def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
             assert all(curve["linestyle"] == "-" for curve in curves)
             assert all(curve["marker"] for curve in curves)
             assert len({curve["color"] for curve in curves}) == len(curves)
+        if name == "crossing_line_marker_curves":
+            assert all(curve["linestyle"] == "-" for curve in curves)
+            assert all(curve["marker"] for curve in curves)
+            assert len({curve["color"] for curve in curves}) == len(curves)
+            assert manifest["synthetic_config"]["crossing_curves"]
+            assert manifest["synthetic_config"]["line_marker_curves"]
+        if name == "same_color_line_marker_curves":
+            assert all(curve["linestyle"] == "-" for curve in curves)
+            assert all(curve["marker"] for curve in curves)
+            assert len({curve["color"] for curve in curves}) == 1
+            assert manifest["synthetic_config"]["line_marker_curves"]
+            assert manifest["synthetic_config"]["same_color_marker_curves"]
         if name == "same_color_marker_curves":
             assert len({curve["color"] for curve in curves}) == 1
             assert len({curve["marker"] for curve in curves}) == len(curves)
@@ -1013,6 +1038,22 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
     assert line_marker_path_summary["mean_path_coverage_ratio"] > 0.75
     assert line_marker_path_summary["rebuilt_path_count"] >= 0
 
+    for name, config in {
+        "crossing_line_marker_path": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True, legend_inside=False),
+        "same_color_line_marker_path": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True, legend_inside=False),
+    }.items():
+        manifest = generate_benchmark(str(tmp_path / "synthetic"), name, config)
+        path_result = run_path_benchmark(str(Path(manifest["image_path"]).parent))
+        path_summary = path_result["summary"]
+        assert path_summary["valid_curve_count"] == path_summary["curve_count"]
+        assert path_summary["mean_data_y_rmse"] is not None
+        assert path_summary["mean_data_y_rmse"] < 0.03
+        assert path_summary["mean_data_x_coverage_ratio"] is not None
+        assert path_summary["mean_data_x_coverage_ratio"] > 0.95
+        assert path_summary["mean_path_coverage_ratio"] is not None
+        assert path_summary["mean_path_coverage_ratio"] > 0.75
+        assert path_summary["rebuilt_path_count"] >= 1
+
     line_marker_manifest = generate_benchmark(
         str(tmp_path / "synthetic"),
         "line_marker_binding",
@@ -1039,6 +1080,27 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
         "prototype_bound_curve_path" in path["warnings"] or "marker_path_uses_source_curve_path" in path["warnings"]
         for path in line_marker_result["pipeline"]["prototype_bound_paths"]
     )
+
+    for name, config in {
+        "crossing_line_marker_binding": SyntheticConfig(seed=26, n_curves=4, crossing_line_marker_curves=True, legend_inside=True),
+        "same_color_line_marker_binding": SyntheticConfig(seed=27, n_curves=4, same_color_line_marker_curves=True, legend_inside=True),
+    }.items():
+        manifest = generate_benchmark(str(tmp_path / "synthetic"), name, config)
+        result = run_prototype_binding_benchmark(str(Path(manifest["image_path"]).parent))
+        summary = result["summary"]
+        assert summary["legend_item_count"] == summary["curve_count"]
+        assert summary["curve_visual_prototype_count"] == summary["curve_count"]
+        assert summary["binding_accuracy"] is not None
+        assert summary["binding_accuracy"] >= 0.75
+        assert summary["prototype_bound_path_count"] >= summary["curve_count"]
+        assert summary["valid_prototype_bound_path_count"] >= summary["curve_count"]
+        assert summary["valid_prototype_bound_data_count"] >= summary["curve_count"]
+        assert summary["labeled_prototype_bound_path_count"] >= summary["curve_count"]
+        assert summary["labeled_prototype_bound_data_count"] >= summary["curve_count"]
+        assert summary["mean_prototype_bound_data_y_rmse"] is not None
+        assert summary["mean_prototype_bound_data_y_rmse"] < 0.05
+        assert summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
+        assert summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.85
 
     manifest = generate_benchmark(
         str(tmp_path / "synthetic"),

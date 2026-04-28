@@ -54,6 +54,7 @@ class PathTracingConfig:
     rebuild_min_observed_pixels: int = 80
     rebuild_max_coverage: float = 0.55
     rebuild_min_x_span_gain: float = 1.15
+    rebuild_smoothing_window_px: int = 7
 
 
 class LinePathExtractor:
@@ -689,6 +690,7 @@ def _rebuild_low_coverage_path(
     if coverage > config.rebuild_max_coverage:
         return None
     rebuilt = _compress_pixels_by_x(selected)
+    rebuilt = _smooth_projection_path(rebuilt, config.rebuild_smoothing_window_px)
     if _pixel_x_span(rebuilt) <= _pixel_x_span(ordered) * config.rebuild_min_x_span_gain:
         return None
     rebuilt, completed_ranges = _connect_rebuilt_projection_path(rebuilt, config)
@@ -703,6 +705,23 @@ def _compress_pixels_by_x(pixels: Set[Pixel]) -> List[Pixel]:
         (x, int(round(float(sum(ys)) / len(ys))))
         for x, ys in sorted(grouped.items())
     ]
+
+
+def _smooth_projection_path(points: Sequence[Pixel], window_px: int) -> List[Pixel]:
+    if len(points) < 3 or window_px <= 0:
+        return list(points)
+    radius = max(1, int(window_px))
+    smoothed: List[Pixel] = []
+    ys = [float(point[1]) for point in points]
+    for idx, (x, y) in enumerate(points):
+        left = max(0, idx - radius)
+        right = min(len(points), idx + radius + 1)
+        window = ys[left:right]
+        if not window:
+            smoothed.append((x, y))
+            continue
+        smoothed.append((x, int(round(sum(window) / len(window)))))
+    return smoothed
 
 
 def _connect_rebuilt_projection_path(points: Sequence[Pixel], config: PathTracingConfig) -> Tuple[List[Pixel], List[Tuple[int, int]]]:
