@@ -94,6 +94,8 @@ class GraphExtractionPipeline:
             if legends:
                 try:
                     legend_items = legend_detector.extract_items(image, legends)
+                    if ocr_results:
+                        legend_detector.assign_item_labels_from_ocr(legend_items, ocr_results)
                     curve_visual_prototypes = legend_detector.visual_prototypes_from_items(legend_items)
                 except Exception as exc:
                     warnings.append(f"Legend item extraction failed: {exc}")
@@ -753,6 +755,7 @@ def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_
             CurvePath(
                 curve_id=f"{prototype.prototype_id}_bound_path",
                 pixel_points_ordered=points,
+                label=prototype.label,
                 confidence_per_point=[confidence for _ in points],
                 endpoints=[points[0], points[-1]] if len(points) >= 2 else list(points),
                 component_count=1,
@@ -805,6 +808,7 @@ def _prototype_bound_line_style_paths(visual_prototypes, prototype_bindings, lin
             CurvePath(
                 curve_id=f"{prototype.prototype_id}_bound_path",
                 pixel_points_ordered=points,
+                label=prototype.label,
                 completed_ranges=completed_ranges,
                 confidence_per_point=_line_style_point_confidences(len(points), completed_ranges, confidence),
                 endpoints=[points[0], points[-1]] if len(points) >= 2 else list(points),

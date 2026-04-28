@@ -178,6 +178,38 @@ class LegendDetector:
                     items.append(item)
         return items
 
+    def assign_item_labels_from_ocr(self, items: List[LegendItem], texts: List[OCRTextBox]) -> List[LegendItem]:
+        """Attach OCR text to legend items by matching OCR boxes to item text regions."""
+        if not items or not texts:
+            return items
+
+        for item in items:
+            if item.text_bbox is None:
+                item.warnings.append("legend_label_missing_text_bbox")
+                continue
+
+            matches = []
+            for text in texts:
+                cleaned = _normalize_label_text(text.text)
+                if not cleaned:
+                    continue
+                center_inside = item.text_bbox.contains(text.center)
+                overlap = _bbox_containment(text.bbox, item.text_bbox)
+                if center_inside or overlap >= 0.20:
+                    matches.append(text)
+
+            if not matches:
+                item.warnings.append("legend_label_missing")
+                continue
+
+            matches.sort(key=lambda text: (text.bbox.y_min, text.bbox.x_min))
+            label = _normalize_label_text(" ".join(text.text for text in matches))
+            if label:
+                item.label = label
+            else:
+                item.warnings.append("legend_label_empty")
+        return items
+
     def visual_prototypes_from_items(self, items: List[LegendItem]) -> List[CurveVisualPrototype]:
         prototypes: List[CurveVisualPrototype] = []
         for item in items:
@@ -494,6 +526,10 @@ def _bbox_containment(a: BoundingBox, b: BoundingBox) -> float:
     inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
     smaller = max(1.0, min(a.width * a.height, b.width * b.height))
     return inter / smaller
+
+
+def _normalize_label_text(text: str) -> str:
+    return " ".join(str(text).strip().split())
 
 
 def _frame_score(component_mask: np.ndarray) -> float:

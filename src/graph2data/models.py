@@ -154,6 +154,7 @@ class CurveMask:
 class CurvePath:
     curve_id: str
     pixel_points_ordered: List[Point]
+    label: Optional[str] = None
     completed_ranges: List[Tuple[int, int]] = field(default_factory=list)
     confidence_per_point: List[float] = field(default_factory=list)
     endpoints: List[Point] = field(default_factory=list)
@@ -279,6 +280,7 @@ class DataSeries:
     curve_id: str
     points: List[DataPoint]
     data_range: DataRange
+    label: Optional[str] = None
     point_count: int = 0
     completed_point_count: int = 0
     x_min: Optional[float] = None

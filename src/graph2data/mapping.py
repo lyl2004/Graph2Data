@@ -40,7 +40,7 @@ def map_curve_path_to_data(curve_path: CurvePath, plot_area: PlotArea, data_rang
 
     if outside_count:
         warnings.append(f"points_outside_plot_area={outside_count}")
-    return _build_series(curve_path.curve_id, points, data_range, warnings)
+    return _build_series(curve_path.curve_id, points, data_range, warnings, label=curve_path.label)
 
 
 def map_curve_paths_to_data(
@@ -55,12 +55,13 @@ def write_data_series_csv(path: str, series_list: Sequence[DataSeries]) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["curve_id", "point_index", "x", "y", "pixel_x", "pixel_y", "confidence", "completed"])
+        writer.writerow(["curve_id", "label", "point_index", "x", "y", "pixel_x", "pixel_y", "confidence", "completed"])
         for series in series_list:
             for idx, point in enumerate(series.points):
                 writer.writerow(
                     [
                         series.curve_id,
+                        series.label or "",
                         idx,
                         f"{point.x:.12g}",
                         f"{point.y:.12g}",
@@ -72,13 +73,20 @@ def write_data_series_csv(path: str, series_list: Sequence[DataSeries]) -> None:
                 )
 
 
-def _build_series(curve_id: str, points: Sequence[DataPoint], data_range: DataRange, warnings: List[str]) -> DataSeries:
+def _build_series(
+    curve_id: str,
+    points: Sequence[DataPoint],
+    data_range: DataRange,
+    warnings: List[str],
+    label: str | None = None,
+) -> DataSeries:
     xs = [point.x for point in points]
     ys = [point.y for point in points]
     return DataSeries(
         curve_id=curve_id,
         points=list(points),
         data_range=data_range,
+        label=label,
         point_count=len(points),
         completed_point_count=sum(1 for point in points if point.completed),
         x_min=min(xs) if xs else None,
@@ -130,6 +138,7 @@ def _curve_path_from_dict(data: dict) -> CurvePath:
     return CurvePath(
         curve_id=data["curve_id"],
         pixel_points_ordered=[Point(float(p["x"]), float(p["y"])) for p in data.get("pixel_points_ordered", [])],
+        label=data.get("label"),
         completed_ranges=[tuple(r) for r in data.get("completed_ranges", [])],
         confidence_per_point=[float(v) for v in data.get("confidence_per_point", [])],
         endpoints=[Point(float(p["x"]), float(p["y"])) for p in data.get("endpoints", [])],

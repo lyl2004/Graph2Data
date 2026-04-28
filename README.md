@@ -23,6 +23,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 断裂补全记录：对虚线/点线等多连通片段执行基础 gap linking，并保存补全区间和点级置信度。
 - 图例污染回归测试：支持绘图区内图例合成场景，能量化排除图例前后的误差变化。
 - 图例 item 诊断解析：已能把检测到的 legend bbox 分块为若干 item，提取样本区域、文本区域、样本颜色和粗略线型，并输出 `debug/legend_items.png`。
+- 图例标签传播：开启 OCR 时，会把落在 legend item 文本区域内的 OCR 文本赋给 `LegendItem.label`，并继续传播到 `CurveVisualPrototype`、prototype-bound path、prototype-bound data series 和导出的 CSV `label` 列；OCR 缺失或识别失败不会阻断图形学 pipeline。
 - 图例 item 行数修正：synthetic 图例底部残留行已在 row 分块阶段过滤；`same_color_marker_curves` 的 legend item 数现与 4 条 truth 曲线对齐，`same_gray_linestyle_curves` 的 legend item 数现与 6 条 truth 曲线对齐。
 - 同灰线型重大修正：`line_style_instance` 当前已加入局部 x-neighborhood rank 分组、组件级 skeleton 主路径拼接和实例内 y 离群组件裁剪；prototype-bound path 的 RMSE / coverage 已进入稳定区间。
 - 同灰线型连续化节点：prototype-bound line-style path 当前会用方向、y 跳变和局部切线约束筛选可连接的 dash/dot gap，执行低置信度 gap interpolation；补全点写入 `completed_ranges` 并以较低点级置信度导出，debug overlay 会用不同颜色显示低置信度补全段。
@@ -34,7 +35,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - Marker 曲线实例输出：pipeline 已输出诊断级 `marker_curve_instances`，并生成 `debug/marker_curve_instances.png`；当前实例基于 marker 中心分组，并可为成功绑定到 marker 实例的图例 prototype 生成 `prototype_bound_paths`；已加入保守过滤，避免 `same_gray_linestyle_curves` 中的虚线/点线碎片被当成 marker 实例抢走绑定。
 - 同灰线型实例诊断：已能把 `line_like` 组件按垂直轨迹分组为诊断级 `line_style_curve_instances`，并输出 `debug/line_style_curve_instances.png`；在 `same_gray_linestyle_curves` 中当前可作为图例顺序约束的实例级绑定目标，并可生成 prototype-bound path/data。
 - Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
-- Prototype-bound path/data 输出：当最佳绑定目标是 `marker_instance` 或 `line_style_instance` 时，pipeline 会按 marker 中心点或线段组件中心点生成 `prototype_bound_paths`，并输出 `debug/prototype_bound_paths.png`；开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`。
+- Prototype-bound path/data 输出：当最佳绑定目标是 `marker_instance` 或 `line_style_instance` 时，pipeline 会按 marker 中心点或线段组件中心点生成 `prototype_bound_paths`，并输出 `debug/prototype_bound_paths.png`；开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`，其中会保留图例标签字段。
 - 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
 
 当前固定 suite 的参考结果：
@@ -76,7 +77,7 @@ legend_inside_curves，排除合成图例区域:
 ```text
 已完成：第一版纯图形学分辨基线和 benchmark 闭环。
 正在推进：图像启发式图例检测的真实图扩展、坐标轴和 OCR 结果的稳定融合、困难曲线场景扩展。
-尚未完成：刻度 OCR 语义解析、完整图例解析、复杂交叉/重叠曲线归属、CSV 校正模块作为 pipeline 后处理内核的正式复用。
+尚未完成：刻度 OCR 语义解析、复杂图例语义解析、复杂交叉/重叠曲线归属、CSV 校正模块作为 pipeline 后处理内核的正式复用。
 ```
 
 ## 当前节点展示
@@ -154,6 +155,7 @@ Get-Content temp\legend_detected_exclude.json
 - 绘图区内图例污染会显著拉高误差，但图像启发式图例排除可以把指标恢复到正常范围。
 - `tests/test1.png` 属于真实灰度样例；当前已能检测并排除右上角无框图例，`paths_overlay.png` 也不再绘制跨片段长连线。但 mask 中仍会把同色/近灰度线条、marker 和部分刻度残片混在一起。当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
 - 可用 `--line_filter_marker_like` 做实验性 marker 过滤对比；该开关会在同一 mask 内存在较长线段组件时跳过紧凑 marker-like 组件，但目前不默认开启，因为它在虚线/点线场景中仍需更强判别条件。
+- CSV 输出已包含 `label` 列；只有开启 OCR 且文本框能匹配到 legend item 文本区域时，该列才会有真实图例文本，否则保持为空并继续输出数值结果。
 - 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进图例样本解析、marker/线型实例分离、刻度 OCR 语义解析和复杂灰度图归属。
 
 展示时重点查看的输出文件：
@@ -193,7 +195,7 @@ temp/stage_demo_artifacts/quality/report.json
 
 1. 图例样本解析
    - 已在 `legend.py` 中加入诊断级 legend item 分块，可把已检测到的 legend bbox 分解为若干 legend item。
-   - 已对每个 item 提取样本区域、文本区域、颜色/灰度和粗略线型；marker 形状和 OCR 标签文本仍待增强。
+   - 已对每个 item 提取样本区域、文本区域、颜色/灰度和粗略线型；开启 OCR 时已可按文本区域匹配并传播标签文本，marker 形状和复杂 OCR 语义仍待增强。
    - 已新增 `LegendItem` 和 `CurveVisualPrototype` 结构，用于描述一条曲线的视觉身份。
    - 已输出 debug artifact：`debug/legend_items.png`，能看到每个图例 item 的 bbox、样本区域和文本区域。
 
@@ -420,10 +422,10 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 
 当前下一步工程任务：
 
-1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，下一步补强 marker 形状、OCR 文本和标签绑定。
-2. 扩展 `synthetic.py`：增加 marker 曲线、同色不同 marker、同灰不同线型、密集图例等下一阶段固定场景。
-3. 增强 `lines.py`：把当前实验性 marker-like 过滤升级为 marker-like / line-like 组件分类，并输出分类 artifact。
-4. 在 `pipeline.py` 中增加 legend item overlay、component classification overlay、prototype binding report。
+1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，并已打通可选 OCR 标签传播；下一步补强复杂图例文本语义和 marker 形状细分。
+2. 继续扩展 prototype-bound 输出：在更多线+marker 混合场景中验证 label、path、data、CSV 的一致性。
+3. 增强 `lines.py`：把 marker-like / line-like 组件诊断进一步用于实例级 mask/path 重建，而不只作为报告输出。
+4. 在 `pipeline.py` 中继续增加真实灰度图的诊断信息，重点解释同灰度曲线被合并或拆开的原因。
 5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。
 
 生成一个带真值数据的合成 benchmark：

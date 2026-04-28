@@ -23,7 +23,7 @@ from graph2data.lines import (
 )
 from graph2data.mapping import map_curve_path_to_data, map_curve_paths_to_data, write_data_series_csv
 from graph2data.masks import _filter_components
-from graph2data.models import BoundingBox, CurvePath, CurveVisualPrototype, DataRange, LineStyleCurveInstance, MarkerCurveInstance, PlotArea, Point, PrototypeBinding
+from graph2data.models import BoundingBox, CurvePath, CurveVisualPrototype, DataRange, LegendItem, LineStyleCurveInstance, MarkerCurveInstance, OCRTextBox, PlotArea, Point, PrototypeBinding
 from graph2data.pipeline import _prototype_bound_line_style_paths, _prototype_bound_marker_paths
 from graph2data.pipeline import GraphExtractionPipeline, PipelineConfig
 from graph2data.quality import evaluate_data_series
@@ -96,6 +96,7 @@ def test_pipeline_paths_outputs_masks_paths_and_artifacts(tmp_path):
 def test_mapping_converts_pixel_path_to_data_coordinates():
     curve_path = CurvePath(
         curve_id="curve",
+        label="Curve A",
         pixel_points_ordered=[
             Point(10.0, 220.0),
             Point(60.0, 120.0),
@@ -110,6 +111,7 @@ def test_mapping_converts_pixel_path_to_data_coordinates():
     series = map_curve_path_to_data(curve_path, plot_area, data_range)
 
     assert series.point_count == 3
+    assert series.label == "Curve A"
     assert series.completed_point_count == 1
     assert series.points[0].x == 0.0
     assert series.points[0].y == -1.0
@@ -119,6 +121,26 @@ def test_mapping_converts_pixel_path_to_data_coordinates():
     assert series.points[1].confidence == 0.35
     assert series.points[2].x == 10.0
     assert series.points[2].y == 1.0
+
+
+def test_data_series_csv_includes_curve_label(tmp_path):
+    curve_path = CurvePath(
+        curve_id="curve",
+        label="Curve A",
+        pixel_points_ordered=[Point(10.0, 220.0), Point(110.0, 20.0)],
+    )
+    plot_area = PlotArea(BoundingBox(10.0, 20.0, 110.0, 220.0))
+    data_range = DataRange(0.0, 10.0, -1.0, 1.0)
+    series = map_curve_path_to_data(curve_path, plot_area, data_range)
+    csv_path = tmp_path / "curves.csv"
+
+    write_data_series_csv(str(csv_path), [series])
+
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["curve_id"] == "curve"
+    assert rows[0]["label"] == "Curve A"
+    assert rows[0]["point_index"] == "0"
 
 
 def test_data_series_quality_metrics_compare_at_predicted_x(tmp_path):
@@ -406,6 +428,53 @@ def test_legend_item_extraction_matches_same_gray_linestyle_curve_count(tmp_path
     assert len(items) == 6
 
 
+def test_legend_item_labels_are_assigned_from_ocr_text_boxes():
+    detector = LegendDetector()
+    item = LegendItem(
+        item_id="legend_00_item_00",
+        legend_index=0,
+        bbox=BoundingBox(10, 10, 120, 30),
+        sample_bbox=BoundingBox(10, 10, 50, 30),
+        text_bbox=BoundingBox(55, 10, 120, 30),
+    )
+    texts = [
+        OCRTextBox(
+            text="Curve",
+            confidence=0.92,
+            polygon=[],
+            bbox=BoundingBox(58, 12, 86, 26),
+            center=Point(72, 19),
+        ),
+        OCRTextBox(
+            text="A",
+            confidence=0.90,
+            polygon=[],
+            bbox=BoundingBox(91, 12, 103, 26),
+            center=Point(97, 19),
+        ),
+    ]
+
+    detector.assign_item_labels_from_ocr([item], texts)
+    prototypes = detector.visual_prototypes_from_items(
+        [
+            LegendItem(
+                item_id=item.item_id,
+                legend_index=item.legend_index,
+                bbox=item.bbox,
+                sample_bbox=item.sample_bbox,
+                text_bbox=item.text_bbox,
+                rgb=(10, 20, 30),
+                lab=(1.0, 2.0, 3.0),
+                label=item.label,
+                confidence=0.8,
+            )
+        ]
+    )
+
+    assert item.label == "Curve A"
+    assert prototypes[0].label == "Curve A"
+
+
 def test_synthetic_next_stage_visual_cases_emit_truth_metadata(tmp_path):
     cases = {
         "marker_curves": SyntheticConfig(seed=21, n_curves=4, marker_curves=True),
@@ -682,6 +751,7 @@ def test_pipeline_outputs_prototype_bound_marker_paths(tmp_path):
     prototype = CurveVisualPrototype(
         prototype_id="legend_proto_00",
         legend_item_id="legend_00_item_00",
+        label="Marker Curve",
         confidence=0.9,
     )
     instance = MarkerCurveInstance(
@@ -707,6 +777,7 @@ def test_pipeline_outputs_prototype_bound_marker_paths(tmp_path):
     assert len(paths) == 1
     path = paths[0]
     assert path.curve_id == "legend_proto_00_bound_path"
+    assert path.label == "Marker Curve"
     assert [(point.x, point.y) for point in path.pixel_points_ordered] == [(10, 70), (20, 60), (30, 50)]
     assert path.observed_pixel_count == 3
     assert path.confidence == pytest.approx(0.8)
@@ -717,6 +788,7 @@ def test_pipeline_maps_prototype_bound_marker_paths_to_data(tmp_path):
     prototype = CurveVisualPrototype(
         prototype_id="legend_proto_00",
         legend_item_id="legend_00_item_00",
+        label="Marker Curve",
         confidence=0.9,
     )
     instance = MarkerCurveInstance(
@@ -746,6 +818,7 @@ def test_pipeline_maps_prototype_bound_marker_paths_to_data(tmp_path):
 
     assert len(series_list) == 1
     assert series_list[0].curve_id == "legend_proto_00_bound_path"
+    assert series_list[0].label == "Marker Curve"
     assert series_list[0].point_count == 3
     assert series_list[0].points[0].x == 0.0
     assert series_list[0].points[0].y == -1.0
@@ -756,6 +829,7 @@ def test_prototype_bound_line_style_paths_use_component_centers():
     prototype = CurveVisualPrototype(
         prototype_id="legend_proto_01",
         legend_item_id="legend_00_item_01",
+        label="Dashed Curve",
         line_style="dashed",
         confidence=0.9,
     )
@@ -783,6 +857,7 @@ def test_prototype_bound_line_style_paths_use_component_centers():
     assert len(paths) == 1
     path = paths[0]
     assert path.curve_id == "legend_proto_01_bound_path"
+    assert path.label == "Dashed Curve"
     assert (path.pixel_points_ordered[0].x, path.pixel_points_ordered[0].y) == (10, 140)
     assert (path.pixel_points_ordered[-1].x, path.pixel_points_ordered[-1].y) == (50, 120)
     assert len(path.pixel_points_ordered) > 3
