@@ -24,6 +24,11 @@ class PathTracingConfig:
     prune_spurs: bool = True
     max_spur_length_px: int = 12
     prefer_longest_component: bool = False
+    filter_marker_like_components: bool = False
+    marker_like_max_span_px: int = 18
+    marker_like_max_aspect_ratio: float = 1.8
+    marker_like_min_line_pixels: int = 40
+    marker_like_min_line_span_px: int = 35
     enable_gap_linking: bool = True
     max_gap_px: float = 45.0
     max_gap_angle_deg: float = 60.0
@@ -69,6 +74,10 @@ class LinePathExtractor:
         if not components:
             return CurvePath(curve_id=curve_id, pixel_points_ordered=[], warnings=["no component above threshold"])
 
+        skipped_marker_like_count = 0
+        if self.config.filter_marker_like_components:
+            components, skipped_marker_like_count = _filter_marker_like_components(components, self.config)
+
         components.sort(key=len, reverse=True)
         selected_components = [components[0]] if self.config.prefer_longest_component else components
         selected = set().union(*selected_components)
@@ -104,6 +113,8 @@ class LinePathExtractor:
             warnings.append("ordered path does not cover all skeleton pixels")
         if completed_ranges:
             warnings.append(f"gap_linked_points={completed_count}")
+        if skipped_marker_like_count:
+            warnings.append(f"marker_like_components_skipped={skipped_marker_like_count}")
 
         return CurvePath(
             curve_id=curve_id,
@@ -158,6 +169,54 @@ def _connected_components(pixels: Set[Pixel]) -> List[Set[Pixel]]:
                     queue.append(nb)
         components.append(comp)
     return components
+
+
+def _filter_marker_like_components(
+    components: Sequence[Set[Pixel]],
+    config: PathTracingConfig,
+) -> Tuple[List[Set[Pixel]], int]:
+    descriptors = [_component_descriptor(component) for component in components]
+    has_line_anchor = any(
+        descriptor["pixel_count"] >= config.marker_like_min_line_pixels
+        or descriptor["max_span"] >= config.marker_like_min_line_span_px
+        or (descriptor["aspect_ratio"] > config.marker_like_max_aspect_ratio and descriptor["max_span"] >= 8)
+        for descriptor in descriptors
+    )
+    if not has_line_anchor:
+        return list(components), 0
+
+    kept = []
+    skipped = 0
+    for component, descriptor in zip(components, descriptors):
+        compact = (
+            descriptor["width"] <= config.marker_like_max_span_px
+            and descriptor["height"] <= config.marker_like_max_span_px
+            and descriptor["aspect_ratio"] <= config.marker_like_max_aspect_ratio
+        )
+        if compact:
+            skipped += 1
+            continue
+        kept.append(component)
+
+    if not kept:
+        return list(components), 0
+    return kept, skipped
+
+
+def _component_descriptor(component: Set[Pixel]) -> Dict[str, float]:
+    xs = [p[0] for p in component]
+    ys = [p[1] for p in component]
+    width = max(xs) - min(xs) + 1
+    height = max(ys) - min(ys) + 1
+    max_span = max(width, height)
+    min_span = max(1, min(width, height))
+    return {
+        "pixel_count": float(len(component)),
+        "width": float(width),
+        "height": float(height),
+        "max_span": float(max_span),
+        "aspect_ratio": float(max_span) / float(min_span),
+    }
 
 
 def _build_graph(pixels: Set[Pixel]) -> Dict[Pixel, List[Pixel]]:
@@ -588,10 +647,16 @@ def main() -> None:
     parser.add_argument("--max_spur_length", type=int, default=12, help="Maximum endpoint spur length to prune before path tracing")
     parser.add_argument("--no_spur_pruning", action="store_true", help="Disable short spur pruning")
     parser.add_argument("--no_gap_linking", action="store_true", help="Disable gap interpolation")
+    parser.add_argument(
+        "--filter_marker_like",
+        action="store_true",
+        help="Experimental: skip compact marker-like components when longer line components exist",
+    )
     args = parser.parse_args()
 
     config = PathTracingConfig(
         enable_gap_linking=not args.no_gap_linking,
+        filter_marker_like_components=args.filter_marker_like,
         min_component_pixels=args.min_component_pixels,
         prune_spurs=not args.no_spur_pruning,
         max_spur_length_px=args.max_spur_length,

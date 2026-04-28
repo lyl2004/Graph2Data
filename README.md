@@ -140,6 +140,7 @@ Get-Content temp\legend_detected_exclude.json
 - 局部短遮挡和轻度交叉已经进入固定回归测试，数据空间误差仍保持在较低水平。
 - 绘图区内图例污染会显著拉高误差，但图像启发式图例排除可以把指标恢复到正常范围。
 - `tests/test1.png` 属于真实灰度样例；当前已能检测并排除右上角无框图例，`paths_overlay.png` 也不再绘制跨片段长连线。但 mask 中仍会把同色/近灰度线条、marker 和部分刻度残片混在一起。当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
+- 可用 `--line_filter_marker_like` 做实验性 marker 过滤对比；该开关会在同一 mask 内存在较长线段组件时跳过紧凑 marker-like 组件，但目前不默认开启，因为它在虚线/点线场景中仍需更强判别条件。
 - 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进图例样本解析、marker/线型实例分离、刻度 OCR 语义解析和复杂灰度图归属。
 
 展示时重点查看的输出文件：
@@ -231,6 +232,15 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 ```
 
 其中 `--map_data` 会自动启用颜色原型、mask、path 和数据坐标映射，并输出 `data/curves.csv` 和 `quality/report.json`。
+
+如需对真实灰度样例试验 marker-like 紧凑组件过滤：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1_marker_filter.json --map_data --x_min 0 --x_max 100 --y_min -10 --y_max 10 --artifact_dir temp\pipeline_test1_marker_filter_artifacts --debug_artifacts --line_filter_marker_like
+```
+
+该开关当前是实验能力，适合对比 `quality/report.json` 中的 `marker_like_components_skipped`、`path_point_count` 和 `debug/paths_overlay.png`。它不是默认策略，避免误伤虚线/点线曲线的真实短片段。
 
 如需开启 OCR：
 
@@ -1004,6 +1014,7 @@ legend_inside_curves，image_heuristic 图例排除:
 - 优化 `lines.py`：将多连通分量按距离、方向、端点切线和曲率连续性综合排序，并预留 X 重叠、超长 gap 和短片段惩罚权重。
 - 当前已增加 gap linking 的端点切线角约束，可通过 `--max_gap_tangent_angle` 调整。
 - 当前已增加骨架短毛刺剪枝，减少伪分叉对主路径追踪的影响。
+- 当前已增加实验性 marker-like 紧凑组件过滤，可通过 `lines.py --filter_marker_like` 或 pipeline 的 `--line_filter_marker_like` 启用；默认关闭，防止误删虚线/点线的真实短片段。
 - 当前已加入局部遮挡/断裂 synthetic case，用于验证 gap linking 对短缺失段的补全质量。
 - 当前已加入轻度交叉 synthetic case，用于验证颜色可分交叉区域的 mask、path 和数据空间稳定性。
 - 后续加入 marker 曲线、同色不同线型、虚线密度变化等 synthetic case。
@@ -1029,7 +1040,7 @@ achromatic_curves:
   出现歧义时有 warnings 或低置信度记录
 ```
 
-当前状态：路径追踪、短毛刺剪枝、综合片段连接评分、gap linking、局部短遮挡 benchmark、轻度交叉 benchmark 和保守 mask 残片过滤已可用；复杂交叉、同色线型归属、marker 分离、线型周期建模和长遮挡补全待做。
+当前状态：路径追踪、短毛刺剪枝、综合片段连接评分、gap linking、局部短遮挡 benchmark、轻度交叉 benchmark、保守 mask 残片过滤和实验性 marker-like 过滤已可用；复杂交叉、同色线型归属、marker/线型联合分离、线型周期建模和长遮挡补全待做。
 
 ### 阶段 F：坐标轴、OCR 与数据空间映射
 

@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 import numpy as np
+import cv2
 
 from graph2data.benchmark import run_suite
 from graph2data.image_io import load_bgr
 from graph2data.legend import LegendDetector
 from graph2data.lines import (
+    LinePathExtractor,
     PathTracingConfig,
     _interpolate_gap,
     _interpolate_gap_points,
@@ -230,6 +232,34 @@ def test_mask_filter_removes_axis_ticks_but_keeps_inner_curve_segments():
     assert int(filtered[20:23, 0:16].sum()) == 0
     assert int(filtered[88:100, 42:45].sum()) == 0
     assert int(filtered[45:51, 50:132].sum()) > 0
+
+
+def test_path_extractor_skips_compact_marker_components_when_line_anchor_exists():
+    mask = np.zeros((80, 160), dtype=np.uint8)
+    cv2.line(mask, (10, 40), (145, 40), 255, 3)
+    for center in ((35, 22), (70, 58), (105, 22)):
+        cv2.circle(mask, center, 6, 255, -1)
+
+    config = PathTracingConfig(filter_marker_like_components=True)
+    path = LinePathExtractor(config).extract_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+    ys = [point.y for point in path.pixel_points_ordered]
+
+    assert len(path.pixel_points_ordered) >= 120
+    assert min(ys) >= 38
+    assert max(ys) <= 42
+    assert any("marker_like_components_skipped=3" == warning for warning in path.warnings)
+
+
+def test_path_extractor_keeps_dotted_curve_when_no_line_anchor_exists():
+    mask = np.zeros((80, 160), dtype=np.uint8)
+    for x in range(12, 145, 16):
+        cv2.circle(mask, (x, 40), 3, 255, -1)
+
+    config = PathTracingConfig(filter_marker_like_components=True)
+    path = LinePathExtractor(config).extract_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id="curve")
+
+    assert path.component_count >= 8
+    assert not any(warning.startswith("marker_like_components_skipped=") for warning in path.warnings)
 
 
 def test_segment_connection_cost_rejects_large_backward_jump():

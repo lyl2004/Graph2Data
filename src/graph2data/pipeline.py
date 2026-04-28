@@ -14,7 +14,7 @@ from .colors import CurveColorExtractor
 from .image_io import ensure_dir, load_bgr, write_json
 from .layout import assign_text_to_regions, build_nine_grid
 from .legend import LegendDetector
-from .lines import LinePathExtractor
+from .lines import LinePathExtractor, PathTracingConfig
 from .mapping import map_curve_paths_to_data, write_data_series_csv
 from .masks import CurveMaskExtractor
 from .models import DataRange, PipelineResult
@@ -33,6 +33,7 @@ class PipelineConfig:
     write_debug_artifacts: bool = False
     use_adaptive_axis_threshold: bool = False
     use_morph_axis_close: bool = False
+    line_filter_marker_like_components: bool = False
 
 
 class GraphExtractionPipeline:
@@ -169,7 +170,9 @@ class GraphExtractionPipeline:
 
     def _extract_masks_and_paths(self, image, curves, plot_bbox, exclude_regions):
         mask_extractor = CurveMaskExtractor()
-        path_extractor = LinePathExtractor()
+        path_extractor = LinePathExtractor(
+            PathTracingConfig(filter_marker_like_components=self.config.line_filter_marker_like_components)
+        )
         curve_masks = []
         curve_paths = []
         mask_artifacts = {}
@@ -418,6 +421,11 @@ def main() -> None:
     parser.add_argument("--debug_artifacts", action="store_true", help="Write visual debug overlays to artifact_dir")
     parser.add_argument("--axis_adaptive", action="store_true", help="Use adaptive thresholding for axis detection")
     parser.add_argument("--axis_morph", action="store_true", help="Use morphology close for axis detection")
+    parser.add_argument(
+        "--line_filter_marker_like",
+        action="store_true",
+        help="Experimental: skip compact marker-like components during path tracing when longer line components exist",
+    )
     args = parser.parse_args()
     run_colors = args.colors or args.masks or args.paths or args.map_data
     run_masks = args.masks or args.paths or args.map_data
@@ -450,6 +458,7 @@ def main() -> None:
             write_debug_artifacts=args.debug_artifacts,
             use_adaptive_axis_threshold=args.axis_adaptive,
             use_morph_axis_close=args.axis_morph,
+            line_filter_marker_like_components=args.line_filter_marker_like,
         )
     ).run(args.img)
 
