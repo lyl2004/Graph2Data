@@ -27,6 +27,15 @@ class LegendDetectorConfig:
     image_max_top_offset_ratio: float = 0.25
     image_corner_margin_ratio: float = 0.06
     image_min_frame_score: float = 0.65
+    image_unframed_search_width_ratio: float = 0.38
+    image_unframed_search_height_ratio: float = 0.45
+    image_unframed_min_dark_pixels: int = 260
+    image_unframed_min_width_px: int = 80
+    image_unframed_min_height_px: int = 45
+    image_unframed_max_density: float = 0.30
+    image_unframed_min_density: float = 0.015
+    image_unframed_max_area_ratio: float = 0.14
+    image_unframed_max_width_ratio: float = 0.36
 
 
 class LegendDetector:
@@ -117,12 +126,12 @@ class LegendDetector:
             candidates.append((score, bbox))
 
         if not candidates:
-            return []
+            candidates.extend(self._detect_unframed_upper_right_legend(gray, offset, plot_area.bbox))
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         detections = []
         for score, bbox in candidates:
-            if any(_bbox_iou(bbox, existing.bbox) > 0.4 for existing in detections):
+            if any(_bbox_iou(bbox, existing.bbox) > 0.4 or _bbox_containment(bbox, existing.bbox) > 0.85 for existing in detections):
                 continue
             detections.append(
                 LegendDetection(
@@ -132,6 +141,59 @@ class LegendDetector:
                 )
             )
         return detections
+
+    def _detect_unframed_upper_right_legend(self, gray: np.ndarray, offset, plot_bbox: BoundingBox):
+        """Detect compact unframed legend clusters in the upper-right plot corner."""
+        h, w = gray.shape[:2]
+        sx0 = int(max(0, w * (1.0 - self.config.image_unframed_search_width_ratio)))
+        sy0 = 0
+        sx1 = w
+        sy1 = int(max(1, h * self.config.image_unframed_search_height_ratio))
+        roi = gray[sy0:sy1, sx0:sx1]
+        if roi.size == 0:
+            return []
+
+        dark = (roi < self.config.image_gray_threshold).astype(np.uint8) * 255
+        # Join nearby text glyphs, sample lines, and markers into a single legend cluster.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 5))
+        joined = cv2.dilate(dark, kernel, iterations=1)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats((joined > 0).astype(np.uint8), connectivity=8)
+        candidates = []
+        for idx in range(1, num):
+            x = int(stats[idx, cv2.CC_STAT_LEFT])
+            y = int(stats[idx, cv2.CC_STAT_TOP])
+            width = int(stats[idx, cv2.CC_STAT_WIDTH])
+            height = int(stats[idx, cv2.CC_STAT_HEIGHT])
+            height = _extend_component_down(dark, x, y, width, height)
+            original_dark = dark[y : y + height, x : x + width] > 0
+            dark_pixels = int(original_dark.sum())
+            box_area = max(1, width * height)
+            density = dark_pixels / box_area
+            if dark_pixels < self.config.image_unframed_min_dark_pixels:
+                continue
+            if width < self.config.image_unframed_min_width_px or height < self.config.image_unframed_min_height_px:
+                continue
+            if width / max(w, 1) > self.config.image_unframed_max_width_ratio:
+                continue
+            if density < self.config.image_unframed_min_density or density > self.config.image_unframed_max_density:
+                continue
+
+            bbox = self._component_bbox(
+                sx0 + x,
+                sy0 + y,
+                width,
+                height,
+                offset,
+                plot_bbox,
+            )
+            if bbox is None:
+                continue
+            area_ratio = (bbox.width * bbox.height) / max(plot_bbox.width * plot_bbox.height, 1.0)
+            if area_ratio > self.config.image_unframed_max_area_ratio:
+                continue
+            score = min(1.0, 0.45 + 0.30 * min(1.0, dark_pixels / 900.0) + 0.25 * min(1.0, width / 180.0))
+            candidates.append((score, bbox))
+        return candidates
 
     def _cluster_by_rows(self, indexed_texts):
         rows = sorted(indexed_texts, key=lambda item: item[1].center.y)
@@ -229,6 +291,16 @@ def _bbox_iou(a: BoundingBox, b: BoundingBox) -> float:
     return inter / max(union, 1.0)
 
 
+def _bbox_containment(a: BoundingBox, b: BoundingBox) -> float:
+    x0 = max(a.x_min, b.x_min)
+    y0 = max(a.y_min, b.y_min)
+    x1 = min(a.x_max, b.x_max)
+    y1 = min(a.y_max, b.y_max)
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    smaller = max(1.0, min(a.width * a.height, b.width * b.height))
+    return inter / smaller
+
+
 def _frame_score(component_mask: np.ndarray) -> float:
     if component_mask.size == 0:
         return 0.0
@@ -241,3 +313,22 @@ def _frame_score(component_mask: np.ndarray) -> float:
     left = np.mean(np.any(component_mask[:, :t], axis=1))
     right = np.mean(np.any(component_mask[:, w - t :], axis=1))
     return float(min(top, bottom, left, right))
+
+
+def _extend_component_down(dark: np.ndarray, x: int, y: int, width: int, height: int) -> int:
+    """Extend an unframed legend box through vertically separated legend rows."""
+    h, _ = dark.shape[:2]
+    x0 = max(0, x - 8)
+    x1 = min(dark.shape[1], x + width + 8)
+    last = y + height
+    gap = 0
+    for row in range(y + height, h):
+        row_dark = int(np.count_nonzero(dark[row, x0:x1]))
+        if row_dark >= 4:
+            last = row + 1
+            gap = 0
+        else:
+            gap += 1
+            if gap > 28:
+                break
+    return max(height, last - y)

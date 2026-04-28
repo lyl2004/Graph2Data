@@ -41,7 +41,7 @@ def test_pipeline_paths_outputs_masks_paths_and_artifacts(tmp_path):
 
     assert result.axis.success
     assert not result.warnings
-    assert [legend for legend in result.legends if legend.source == "image_heuristic"] == []
+    assert [legend for legend in result.legends if legend.source == "image_heuristic"]
     assert len(result.curves) > 0
     assert len(result.curve_masks) == len(result.curves)
     assert len(result.curve_paths) == len(result.curves)

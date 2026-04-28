@@ -138,7 +138,7 @@ Get-Content temp\legend_detected_exclude.json
 - 目前对颜色可分、函数型曲线的恢复已经形成稳定工程闭环。
 - 局部短遮挡和轻度交叉已经进入固定回归测试，数据空间误差仍保持在较低水平。
 - 绘图区内图例污染会显著拉高误差，但图像启发式图例排除可以把指标恢复到正常范围。
-- `tests/test1.png` 属于真实灰度样例，mask 中仍可能包含图例、marker、文字或边框残留；当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
+- `tests/test1.png` 属于真实灰度样例；当前已能检测并排除右上角无框图例，但 mask 中仍可能包含 marker、刻度或边框残留。当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
 - 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进刻度 OCR 语义解析、完整图例解析、marker 曲线和同色不同线型。
 
 展示时重点查看的输出文件：
@@ -453,6 +453,7 @@ legend_inside_curves predicted-mask，排除合成图例区域:
 
 - `legend.py` 根据绘图区内 OCR 文本簇给出保守的 legend bbox 候选。
 - `legend.py` 也支持图像启发式检测常见带框内置图例，可识别 upper-left、lower-right 等角落位置。
+- `legend.py` 也支持右上角无框图例簇检测，用于排除真实灰度样例中由图例文字和样本线造成的 mask 污染。
 - `pipeline.py` 在开启 OCR 和颜色提取时，会将检测到的 legend bbox 传给颜色提取模块作为排除区域。
 - `colors.py` 和 `masks.py` 均支持 `exclude_regions`，用于在颜色原型提取或 mask 生成时排除图例区域。
 - `synthetic.py` 支持 `--legend_inside`，用于稳定复现绘图区内图例污染。
@@ -465,6 +466,7 @@ legend_inside_curves predicted-mask，排除合成图例区域:
 ```text
 真实 pipeline：使用 OCR 文本簇启发式检测 legend bbox。
 真实 pipeline：使用图像启发式检测内置带框 legend bbox。
+真实 pipeline：使用右上角无框图例簇启发式检测 legend bbox。
 合成 benchmark：使用已知合成图例区域作为排除框，保证图例污染前后对比可复现。
 ```
 
