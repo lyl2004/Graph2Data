@@ -54,7 +54,8 @@ class CurveMaskExtractor:
         target = np.array(prototype.lab, dtype=np.float32)
         diff_l = np.abs(lab[:, :, 0] - target[0])
         diff_ab = np.sqrt((lab[:, :, 1] - target[1]) ** 2 + (lab[:, :, 2] - target[2]) ** 2)
-        mask = ((diff_l <= self.config.range_l) & (diff_ab <= self.config.range_ab)).astype(np.uint8) * 255
+        range_l = min(self.config.range_l, 24.0) if prototype.source == "guided_gray" else self.config.range_l
+        mask = ((diff_l <= range_l) & (diff_ab <= self.config.range_ab)).astype(np.uint8) * 255
         if exclude_regions:
             _apply_exclusions(mask, exclude_regions, offset)
         if self._is_gray_prototype(prototype):

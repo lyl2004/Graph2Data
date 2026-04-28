@@ -35,7 +35,7 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 - 同色 marker 分组诊断：prototype-binding benchmark 已加入局部 x-neighborhood rank 分组，可把同色 marker 候选按轨迹分成多组；`same_color_marker_curves` 的 marker group assignment accuracy 当前约 1.0。
 - Marker 曲线实例输出：pipeline 已输出诊断级 `marker_curve_instances`，并生成 `debug/marker_curve_instances.png`；当前实例默认基于 marker 中心分组，在 line-like 组件明显增多的场景下可切换到 trajectory-ransac 分组尝试维持 crossing 曲线身份；已加入保守过滤，避免 `same_gray_linestyle_curves` 中的虚线/点线碎片被当成 marker 实例抢走绑定。
 - 同灰线型实例诊断：已能把 `line_like` 组件按垂直轨迹分组为诊断级 `line_style_curve_instances`，并输出 `debug/line_style_curve_instances.png`；在 `same_gray_linestyle_curves` 中当前可作为图例顺序约束的实例级绑定目标，并可生成 prototype-bound path/data。
-- Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves`、`same_gray_line_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
+- Prototype 绑定诊断：已能对 legend item 生成的 `CurveVisualPrototype`、绘图区曲线结果、`marker_curve_instances` 和 `line_style_curve_instances` 计算诊断级绑定评分，输出 `prototype_bindings` 和质量报告 `binding_summary`；在 `same_color_marker_curves`、`same_gray_line_marker_curves`、`crossing_same_gray_line_marker_curves` 与 `same_gray_linestyle_curves` 中 binding accuracy 当前约 1.0。
 - Prototype-bound path/data 输出：当最佳绑定目标是 `curve`、`marker_instance` 或 `line_style_instance` 时，pipeline 都会生成 `prototype_bound_paths`；其中 direct curve 绑定会复用原始曲线路径，marker 绑定在可唯一回溯到源曲线时会优先复用连续线条 path，而不是只保留稀疏 marker 中心点。开启 `--map_data` 且提供坐标范围时，会额外输出 `data/prototype_bound_curves.csv` 和 `prototype_bound_data_series`，其中会保留图例标签字段。
 - 路径质量诊断：quality report 的 `path_summary` 与逐曲线 `curves[]` 现已增加 `mean_path_coverage_ratio` / `path_coverage_ratio` 和 `rebuilt_path_count` / `path_rebuilt`，可直接观察普通 path 是否因 marker junction 触发了重建。
 - 质量评估：包含路径级 Chamfer/Hausdorff/truth-to-pred 指标，以及 mask 级 IoU/F1 和 2px 容差 F1。
@@ -365,8 +365,14 @@ mean_data_x_coverage_ratio ≈ 0.99
 mean_path_coverage_ratio ≈ 0.93
 rebuilt_path_count ≈ 1
 
-说明：该场景已纳入生成和普通 path 回归，但 prototype binding 仍是下一阶段难点。
-在低色彩区分度、曲线交叉且 legend 只提供粗 marker 风格时，当前 marker x-rank/trajectory 分组仍可能发生身份交换。
+prototype-binding benchmark:
+binding_accuracy ≈ 1.0
+prototype_bound_path_count = curve_count = 4
+mean_prototype_bound_data_y_rmse 当前约 0.42
+mean_prototype_bound_data_x_coverage_ratio 当前约 0.99
+
+说明：该场景的 prototype 身份绑定已通过细灰阶 legend guidance、一对一 target 分配和 marker-instance 降权收口。
+当前主要剩余问题是部分 prototype 仍会回退到 line_style_instance 或细灰阶 direct path，数据 RMSE 尚明显高于普通 path。
 ```
 
 当前 `same_color_marker_curves` 诊断参考：
@@ -406,7 +412,7 @@ prototype_bound_path_summary.completed_point_ratio 有结构化输出
 binding_accuracy ≈ 1.0
 ```
 
-说明：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已用于验证普通 path 质量门、prototype-bound 输出、标签传播和 CSV/data 一致性；`crossing_same_gray_line_marker_curves` 已纳入生成和普通 path 回归，但其 prototype binding 仍需要更强的 marker 形状细分或跨交叉点轨迹身份保持。通用 path 提取已能在低覆盖 junction 场景下触发平滑 skeleton x 投影重建。`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
+说明：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已用于验证普通 path 质量门、prototype-bound 输出、标签传播和 CSV/data 一致性；`crossing_same_gray_line_marker_curves` 的 prototype binding 身份已收口，但 prototype-bound 数据误差仍需通过 marker 形状细分、跨交叉点轨迹保持或更可靠的 direct path mask 继续降低。通用 path 提取已能在低覆盖 junction 场景下触发平滑 skeleton x 投影重建。`same_gray_linestyle_curves` 的绑定准确率、legend item 行数、prototype-bound path coverage 和数据误差现在都已收口到可展示区间。gap interpolation 已加入方向、y 跳变和局部切线约束，但仍是线性插值。下一步应继续引入曲率/局部趋势拟合，进一步压低 Hausdorff 并提升 path 平滑度。
 
 下一阶段验收标准：
 
@@ -526,7 +532,7 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 当前下一步工程任务：
 
 1. 继续推进 `legend.py`：当前已完成诊断级“图例 item 分块 + 样本区域/文本区域/颜色/粗线型提取”，并已打通可选 OCR 标签传播；下一步补强复杂图例文本语义和 marker 形状细分。
-2. 继续扩展 prototype-bound 输出：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已验证 bound path、标签传播、data series 和 CSV 字段一致性；下一步重点攻克 `crossing_same_gray_line_marker_curves` 的 marker 身份保持，并继续覆盖更复杂遮挡场景。
+2. 继续扩展 prototype-bound 输出：`line_marker_curves`、`crossing_line_marker_curves`、`same_color_line_marker_curves` 和 `same_gray_line_marker_curves` 已验证 bound path、标签传播、data series 和 CSV 字段一致性；`crossing_same_gray_line_marker_curves` 的 prototype 身份绑定已收口，下一步重点压低该场景的 prototype-bound data RMSE，并继续覆盖更复杂遮挡场景。
 3. 增强 `lines.py`：marker junction 导致的短路径重建现已前移到通用 path extraction，并加入平滑 x 投影中心线；下一步将该策略升级为更贴合局部曲率的路径拟合。
 4. 在 `pipeline.py` 中继续增加真实灰度图的诊断信息，重点解释同灰度曲线被合并或拆开的原因。
 5. 保持现有 benchmark 不退化，再逐步接入真实灰度图 `tests/test1.png` 的诊断改进。

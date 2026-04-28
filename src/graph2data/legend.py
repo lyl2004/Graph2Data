@@ -626,7 +626,14 @@ def _sample_color_and_lab(image_bgr: np.ndarray, bbox: BoundingBox, threshold: i
     pixel_count = int(np.count_nonzero(foreground))
     if pixel_count <= 0:
         return None, None, 0
-    mean_bgr = crop[foreground].mean(axis=0)
+    foreground_pixels = crop[foreground]
+    foreground_gray = gray[foreground]
+    target_gray = float(np.percentile(foreground_gray, 20))
+    representative = np.abs(foreground_gray.astype(np.float32) - target_gray) <= 8.0
+    if np.count_nonzero(representative) < max(3, pixel_count // 12):
+        cutoff = float(np.percentile(foreground_gray, 35))
+        representative = foreground_gray <= cutoff
+    mean_bgr = foreground_pixels[representative].mean(axis=0)
     lab_pix = cv2.cvtColor(np.uint8([[mean_bgr]]), cv2.COLOR_BGR2Lab)[0][0]
     rgb = (int(round(mean_bgr[2])), int(round(mean_bgr[1])), int(round(mean_bgr[0])))
     lab = (float(lab_pix[0]), float(lab_pix[1]), float(lab_pix[2]))

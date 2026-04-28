@@ -102,7 +102,8 @@ class GraphExtractionPipeline:
 
             if run_colors:
                 try:
-                    curves = CurveColorExtractor().extract(
+                    color_extractor = CurveColorExtractor()
+                    curves = color_extractor.extract(
                         image,
                         axis.plot_area.bbox,
                         exclude_regions=[legend.bbox for legend in legends],
@@ -745,11 +746,7 @@ def _prototype_bound_curve_paths(visual_prototypes, prototype_bindings, curve_pa
         return []
     curve_path_by_id = {path.curve_id: path for path in curve_paths}
     line_components = list(line_components or [])
-    best_by_prototype = {}
-    for binding in prototype_bindings:
-        current = best_by_prototype.get(binding.prototype_id)
-        if current is None or binding.score > current.score:
-            best_by_prototype[binding.prototype_id] = binding
+    best_by_prototype = _best_unique_binding_by_prototype(prototype_bindings)
 
     paths = []
     used_curve_ids = set()
@@ -857,11 +854,7 @@ def _prototype_bound_marker_paths(visual_prototypes, prototype_bindings, marker_
     marker_instance_count_by_source = {}
     for instance in marker_curve_instances:
         marker_instance_count_by_source[instance.source_curve_id] = marker_instance_count_by_source.get(instance.source_curve_id, 0) + 1
-    best_by_prototype = {}
-    for binding in prototype_bindings:
-        current = best_by_prototype.get(binding.prototype_id)
-        if current is None or binding.score > current.score:
-            best_by_prototype[binding.prototype_id] = binding
+    best_by_prototype = _best_unique_binding_by_prototype(prototype_bindings)
 
     paths = []
     used_marker_instance_ids = set()
@@ -934,11 +927,7 @@ def _prototype_bound_line_style_paths(visual_prototypes, prototype_bindings, lin
     if not visual_prototypes or not prototype_bindings or not line_style_curve_instances:
         return []
     line_instance_by_id = {instance.instance_id: instance for instance in line_style_curve_instances}
-    best_by_prototype = {}
-    for binding in prototype_bindings:
-        current = best_by_prototype.get(binding.prototype_id)
-        if current is None or binding.score > current.score:
-            best_by_prototype[binding.prototype_id] = binding
+    best_by_prototype = _best_unique_binding_by_prototype(prototype_bindings)
 
     paths = []
     used_line_instance_ids = set()
@@ -1086,6 +1075,26 @@ def _line_style_point_confidences(point_count, completed_ranges, observed_confid
     return confidences
 
 
+def _best_unique_binding_by_prototype(bindings, target_type=None):
+    selected = {}
+    used_targets = set()
+    candidates = [
+        binding
+        for binding in bindings
+        if target_type is None or getattr(binding, "target_type", "curve") == target_type
+    ]
+    candidates.sort(key=lambda item: (-float(item.score), item.prototype_id, item.target_type, item.target_curve_id))
+    for binding in candidates:
+        if binding.prototype_id in selected:
+            continue
+        target_key = (binding.target_type, binding.target_curve_id)
+        if target_key in used_targets:
+            continue
+        selected[binding.prototype_id] = binding
+        used_targets.add(target_key)
+    return selected
+
+
 def _score_prototype_bindings(
     visual_prototypes,
     curves,
@@ -1160,6 +1169,9 @@ def _score_prototype_bindings(
             warnings = []
             if proto.marker_style == "unknown":
                 warnings.append("prototype_marker_unknown")
+            if len(curves) >= len(visual_prototypes) > 1:
+                score *= 0.88
+                warnings.append("color_covered_scene_penalizes_marker_instance")
             if len(curves) >= len(visual_prototypes) and "mixed_source_curve_ids" in getattr(instance, "warnings", []):
                 score *= 0.82
                 warnings.append("mixed_source_marker_instance_penalty")
@@ -1293,11 +1305,7 @@ def _ordinal_similarity(proto_idx, instance_idx, prototype_count, instance_count
 def _binding_summary(bindings):
     if not bindings:
         return {"binding_count": 0, "best_by_prototype": []}
-    best = {}
-    for binding in bindings:
-        current = best.get(binding.prototype_id)
-        if current is None or binding.score > current.score:
-            best[binding.prototype_id] = binding
+    best = _best_unique_binding_by_prototype(bindings)
     return {
         "binding_count": len(bindings),
         "prototype_count": len(best),

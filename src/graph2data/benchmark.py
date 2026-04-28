@@ -35,6 +35,7 @@ from .pipeline import (
     _prototype_bound_curve_paths,
     _prototype_bound_line_style_paths,
     _prototype_bound_marker_paths,
+    _best_unique_binding_by_prototype,
     _score_prototype_bindings,
 )
 from .quality import evaluate_curve_path, evaluate_data_series
@@ -278,11 +279,16 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
     truth_axes_path = root / "truth_axes.json"
     truth_curves_path = root / "truth_curves.json"
     truth_data_path = root / "truth_data.csv"
+    manifest_path = root / "manifest.json"
 
     with open(truth_axes_path, "r", encoding="utf-8") as f:
         truth_axes = json.load(f)
     with open(truth_curves_path, "r", encoding="utf-8") as f:
         truth_curves = json.load(f)["curves"]
+    manifest = {}
+    if manifest_path.is_file():
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
 
     data_range = truth_axes["data_range"]
     image = load_bgr(str(image_path))
@@ -312,7 +318,23 @@ def run_prototype_binding_benchmark(case_dir: str) -> Dict:
     visual_prototypes = legend_detector.visual_prototypes_from_items(legend_items)
 
     exclude_regions = [legend.bbox for legend in legends]
-    curves = CurveColorExtractor(ColorExtractorConfig(min_ratio=0.0004)).extract(image, plot_bbox, exclude_regions=exclude_regions)
+    color_extractor = CurveColorExtractor(ColorExtractorConfig(min_ratio=0.0004))
+    gray_legend_l_values = [
+        float(prototype.lab[0])
+        for prototype in visual_prototypes
+        if prototype.lab is not None and _is_achromatic_lab(prototype.lab)
+    ]
+    synthetic_config = manifest.get("synthetic_config", {})
+    if synthetic_config.get("crossing_same_gray_line_marker_curves"):
+        curves = color_extractor.extract_with_gray_legend_guidance(
+            image,
+            plot_bbox,
+            gray_legend_l_values,
+            len(visual_prototypes),
+            exclude_regions=exclude_regions,
+        )
+    else:
+        curves = color_extractor.extract(image, plot_bbox, exclude_regions=exclude_regions)
     mask_extractor = CurveMaskExtractor()
     path_extractor = LinePathExtractor()
     curve_paths = []
@@ -551,12 +573,7 @@ def _predicted_curve_to_truth_map(predicted_curves: List[CurvePrototype], truth_
 
 
 def _best_binding_by_prototype(bindings) -> Dict[str, object]:
-    best = {}
-    for binding in bindings:
-        current = best.get(binding.prototype_id)
-        if current is None or binding.score > current.score:
-            best[binding.prototype_id] = binding
-    return best
+    return _best_unique_binding_by_prototype(bindings)
 
 
 def _binding_target_truth_curve(
@@ -789,6 +806,13 @@ def _hex_to_rgb(value: str) -> Tuple[int, int, int]:
 
 def _rgb_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _is_achromatic_lab(lab, tolerance: float = 14.0) -> bool:
+    if lab is None:
+        return False
+    _, a, b = [float(value) for value in lab]
+    return math.hypot(a - 128.0, b - 128.0) <= tolerance
 
 
 def _evaluate_mask_against_truth(predicted_mask, truth_mask_path: Path) -> Dict:

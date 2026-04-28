@@ -31,6 +31,7 @@ class ColorExtractorConfig:
     gray_min_l: int = 95
     gray_max_l: int = 195
     gray_max_chroma: int = 12
+    fine_gray_merge_diff_l: int = 18
 
 
 class CurveColorExtractor:
@@ -161,6 +162,37 @@ class CurveColorExtractor:
             if not matched:
                 palette.append({"lab": curr_lab, "area": curr_area, "count": 1})
         return palette
+
+    def extract_with_gray_legend_guidance(
+        self,
+        image_bgr: np.ndarray,
+        region: Optional[BoundingBox],
+        legend_l_values: Sequence[float],
+        target_count: int,
+        exclude_regions: Optional[Sequence[BoundingBox]] = None,
+    ) -> List[CurvePrototype]:
+        prototypes = self.extract(image_bgr, region, exclude_regions=exclude_regions)
+        if len(prototypes) >= target_count:
+            return prototypes
+        legend_levels = sorted(float(value) for value in legend_l_values if value is not None)
+        if len(legend_levels) < target_count:
+            return prototypes
+        if max(legend_levels) - min(legend_levels) < 18.0:
+            return prototypes
+        fine_cfg = ColorExtractorConfig(
+            **{
+                **self.config.__dict__,
+                "merge_diff_l": min(self.config.merge_diff_l, self.config.fine_gray_merge_diff_l),
+                "gray_max_l": max(self.config.gray_max_l, 240),
+                "max_l": max(self.config.max_l, 255),
+            }
+        )
+        guided = CurveColorExtractor(fine_cfg).extract(image_bgr, region, exclude_regions=exclude_regions)
+        if len(guided) > len(prototypes):
+            for prototype in guided:
+                prototype.source = "guided_gray"
+            return guided
+        return prototypes
 
     def _to_prototypes(self, palette, total_pixels: int, offset) -> List[CurvePrototype]:
         cfg = self.config

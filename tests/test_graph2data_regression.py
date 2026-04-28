@@ -1131,6 +1131,25 @@ def test_prototype_binding_benchmark_reports_synthetic_metrics(tmp_path):
         assert summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
         assert summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.85
 
+    crossing_gray_manifest = generate_benchmark(
+        str(tmp_path / "synthetic"),
+        "crossing_same_gray_line_marker_binding",
+        SyntheticConfig(seed=29, n_curves=4, crossing_same_gray_line_marker_curves=True, legend_inside=True),
+    )
+    crossing_gray_result = run_prototype_binding_benchmark(str(Path(crossing_gray_manifest["image_path"]).parent))
+    crossing_gray_summary = crossing_gray_result["summary"]
+    assert crossing_gray_summary["legend_item_count"] == crossing_gray_summary["curve_count"]
+    assert crossing_gray_summary["curve_visual_prototype_count"] == crossing_gray_summary["curve_count"]
+    assert crossing_gray_summary["binding_accuracy"] == pytest.approx(1.0)
+    assert crossing_gray_summary["prototype_bound_path_count"] == crossing_gray_summary["curve_count"]
+    assert crossing_gray_summary["valid_prototype_bound_path_count"] == crossing_gray_summary["curve_count"]
+    assert crossing_gray_summary["valid_prototype_bound_data_count"] == crossing_gray_summary["curve_count"]
+    assert crossing_gray_summary["mean_prototype_bound_data_y_rmse"] is not None
+    assert crossing_gray_summary["mean_prototype_bound_data_y_rmse"] < 0.45
+    assert crossing_gray_summary["mean_prototype_bound_data_x_coverage_ratio"] is not None
+    assert crossing_gray_summary["mean_prototype_bound_data_x_coverage_ratio"] > 0.85
+    assert all(row["success"] for row in crossing_gray_result["prototypes"] if row["expected_curve_id"] is not None)
+
     manifest = generate_benchmark(
         str(tmp_path / "synthetic"),
         "same_color_marker_binding",
