@@ -99,6 +99,17 @@ class CurvePrototype:
 
 
 @dataclass
+class CurveMask:
+    curve_id: str
+    mask_path: Optional[str] = None
+    pixel_count: int = 0
+    bbox: Optional[BoundingBox] = None
+    confidence: float = 0.0
+    source: str = "color_threshold"
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CurvePath:
     curve_id: str
     pixel_points_ordered: List[Point]

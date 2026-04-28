@@ -27,13 +27,22 @@ CURVE_STYLES: Sequence[Tuple[str, str]] = (
     ("#8c564b", "--"),
 )
 
+ACHROMATIC_STYLES: Sequence[Tuple[str, str]] = (
+    ("#000000", "-"),
+    ("#777777", "--"),
+    ("#1f77b4", "-."),
+    ("#d62728", ":"),
+    ("#2ca02c", "-"),
+    ("#ff7f0e", "--"),
+)
+
 
 @dataclass
 class SyntheticConfig:
     width_px: int = 1200
     height_px: int = 750
     dpi: int = 150
-    axes_position: Tuple[float, float, float, float] = (0.12, 0.14, 0.76, 0.74)
+    axes_position: Tuple[float, float, float, float] = (0.12, 0.14, 0.66, 0.74)
     seed: int = 42
     n_curves: int = 6
     n_points: int = 800
@@ -41,6 +50,7 @@ class SyntheticConfig:
     x_max: float = 30.0
     y_min: float = -1.0
     y_max: float = 5.0
+    palette: str = "basic"
 
 
 def generate_curve_family(config: SyntheticConfig) -> Tuple[np.ndarray, List[np.ndarray], List[Dict]]:
@@ -52,7 +62,8 @@ def generate_curve_family(config: SyntheticConfig) -> Tuple[np.ndarray, List[np.
 
     base = 0.4 * np.sin(0.55 * x) + 0.07 * x
     for idx in range(config.n_curves):
-        color, linestyle = CURVE_STYLES[idx % len(CURVE_STYLES)]
+        styles = ACHROMATIC_STYLES if config.palette == "achromatic" else CURVE_STYLES
+        color, linestyle = styles[idx % len(styles)]
         phase = idx * 0.7
         amp = 0.18 + 0.04 * idx
         offset = idx * 0.38
@@ -145,7 +156,7 @@ def _render_image(path: str, x: np.ndarray, y_list: List[np.ndarray], metadata: 
     ax.set_ylabel("Response")
     ax.set_title("Synthetic Benchmark: Basic Curves")
     ax.grid(True, linestyle="--", linewidth=0.6, color="#d0d0d0", alpha=0.8)
-    ax.legend(loc="upper left", fontsize=8, frameon=True)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize=8, frameon=True)
     fig.savefig(path, dpi=config.dpi)
     plt.close(fig)
 
@@ -210,12 +221,13 @@ def main() -> None:
     parser.add_argument("--name", default="basic_curves", help="Benchmark case name")
     parser.add_argument("--curves", type=int, default=6, help="Number of curves")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--palette", choices=["basic", "achromatic"], default="basic", help="Synthetic curve palette")
     args = parser.parse_args()
 
     manifest = generate_benchmark(
         output_dir=args.out,
         name=args.name,
-        config=SyntheticConfig(seed=args.seed, n_curves=args.curves),
+        config=SyntheticConfig(seed=args.seed, n_curves=args.curves, palette=args.palette),
     )
     print(f"Generated benchmark: {manifest['image_path']}")
 

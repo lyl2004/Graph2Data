@@ -20,11 +20,11 @@ Pixel = Tuple[int, int]  # (x, y)
 @dataclass
 class PathTracingConfig:
     threshold: int = 127
-    min_component_pixels: int = 3
+    min_component_pixels: int = 1
     prefer_longest_component: bool = False
     enable_gap_linking: bool = True
-    max_gap_px: float = 35.0
-    max_gap_angle_deg: float = 45.0
+    max_gap_px: float = 45.0
+    max_gap_angle_deg: float = 60.0
     backward_x_tolerance_px: float = 2.0
     completed_point_confidence: float = 0.35
 
@@ -400,13 +400,15 @@ def main() -> None:
     parser.add_argument("--mask", required=True, help="Input binary/color mask path")
     parser.add_argument("--curve_id", default="curve", help="Curve id for the output")
     parser.add_argument("--out", default=None, help="Optional JSON output path")
-    parser.add_argument("--max_gap", type=float, default=35.0, help="Maximum gap length for linking")
-    parser.add_argument("--max_gap_angle", type=float, default=45.0, help="Maximum angle mismatch for gap linking")
+    parser.add_argument("--max_gap", type=float, default=45.0, help="Maximum gap length for linking")
+    parser.add_argument("--max_gap_angle", type=float, default=60.0, help="Maximum angle mismatch for gap linking")
+    parser.add_argument("--min_component_pixels", type=int, default=1, help="Minimum skeleton component size")
     parser.add_argument("--no_gap_linking", action="store_true", help="Disable gap interpolation")
     args = parser.parse_args()
 
     config = PathTracingConfig(
         enable_gap_linking=not args.no_gap_linking,
+        min_component_pixels=args.min_component_pixels,
         max_gap_px=args.max_gap,
         max_gap_angle_deg=args.max_gap_angle,
     )

@@ -48,6 +48,7 @@ axes.py         坐标轴和绘图区检测
 layout.py       基于绘图区的九宫格划分和 OCR 归类
 ocr.py          RapidOCR 包装
 colors.py       曲线颜色原型提取
+masks.py        根据颜色原型生成曲线 mask
 pipeline.py     结构化 pipeline 入口
 synthetic.py    合成 benchmark 生成器
 quality.py      最小质量评估工具
@@ -119,6 +120,21 @@ $env:PYTHONPATH='src'
 pixi run python -m graph2data.benchmark --case benchmarks\synthetic\basic_curves --out temp\basic_curves_benchmark.json
 ```
 
+批量评估“颜色原型 -> 预测 mask -> 路径”的图形学分辨链路：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\basic_curves --mode predicted-mask --mask_out temp\basic_predicted_masks --out temp\basic_pred_benchmark.json
+```
+
+生成黑色/灰色曲线共存的基准图：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name achromatic_curves --palette achromatic
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\achromatic_curves --mode predicted-mask --mask_out temp\achromatic_predicted_masks --out temp\achromatic_pred_benchmark.json
+```
+
 当前 `lines.py` 是线条提取的第一版基线：
 
 - 对 mask 二值化。
@@ -140,6 +156,25 @@ pixi run python -m graph2data.benchmark --case benchmarks\synthetic\basic_curves
 - observed/completed 分离误差：分别评估真实观测点和补全点相对真值曲线的偏差。
 
 其中 truth-to-pred 距离对虚线和遮挡尤其重要，因为它能反映真值曲线中有多少区域没有被提取路径覆盖。
+
+当前纯图形学分辨基线在合成图上的参考结果：
+
+```text
+basic_curves predicted-mask:
+  mean_chamfer_distance_px ≈ 0.83
+  mean_truth_to_pred_px    ≈ 0.87
+
+achromatic_curves predicted-mask:
+  mean_chamfer_distance_px ≈ 0.87
+  mean_truth_to_pred_px    ≈ 0.92
+```
+
+`achromatic_curves` 用于验证黑色曲线、灰色曲线和彩色曲线共存时的分辨能力。当前策略包括：
+
+- 在绘图区内缩后提取颜色，降低坐标轴边框干扰。
+- 对黑色/灰色等低色度曲线单独抽取 achromatic prototype。
+- 对灰色曲线 mask 扣除黑色像素的膨胀邻域，避免吃进黑线抗锯齿边缘。
+- 删除长而薄的网格/边框组件。
 
 ## 已成型流程：CSV 校正
 

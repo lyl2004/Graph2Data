@@ -24,6 +24,13 @@ class ColorExtractorConfig:
     merge_diff_ab: int = 20
     min_ratio: float = 0.001
     max_ratio: float = 0.90
+    inset_px: int = 3
+    include_achromatic: bool = True
+    achromatic_min_area: int = 8
+    dark_max_l: int = 95
+    gray_min_l: int = 95
+    gray_max_l: int = 195
+    gray_max_chroma: int = 12
 
 
 class CurveColorExtractor:
@@ -71,6 +78,9 @@ class CurveColorExtractor:
                 if cfg.min_l <= mean_lab[0] <= cfg.max_l and c_val >= cfg.min_chroma:
                     raw_regions.append({"lab": np.array(mean_lab, dtype=np.float32), "area": int(area)})
 
+        if cfg.include_achromatic:
+            raw_regions.extend(self._extract_achromatic_regions(lab, chroma))
+
         merged = self._merge_regions(raw_regions)
         return self._to_prototypes(merged, total_pixels, offset)
 
@@ -82,7 +92,35 @@ class CurveColorExtractor:
         y0 = max(0, int(region.y_min))
         x1 = min(w, int(region.x_max))
         y1 = min(h, int(region.y_max))
+        if self.config.inset_px > 0 and x1 - x0 > 2 * self.config.inset_px and y1 - y0 > 2 * self.config.inset_px:
+            x0 += self.config.inset_px
+            y0 += self.config.inset_px
+            x1 -= self.config.inset_px
+            y1 -= self.config.inset_px
         return image_bgr[y0:y1, x0:x1].copy(), (x0, y0)
+
+    def _extract_achromatic_regions(self, lab: np.ndarray, chroma: np.ndarray):
+        cfg = self.config
+        l_channel = lab[:, :, 0]
+        dark = l_channel <= cfg.dark_max_l
+        gray = (chroma <= cfg.gray_max_chroma) & (l_channel >= cfg.gray_min_l) & (l_channel <= cfg.gray_max_l)
+        regions = []
+        for mask in (dark, gray):
+            regions.extend(self._regions_from_mask(mask.astype(np.uint8), lab))
+        return regions
+
+    def _regions_from_mask(self, mask: np.ndarray, lab: np.ndarray):
+        cfg = self.config
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        regions = []
+        for idx in range(1, num):
+            area = int(stats[idx, cv2.CC_STAT_AREA])
+            if area < cfg.achromatic_min_area:
+                continue
+            component_mask = (labels == idx).astype(np.uint8)
+            mean_lab = cv2.mean(lab, mask=component_mask)[:3]
+            regions.append({"lab": np.array(mean_lab, dtype=np.float32), "area": area})
+        return regions
 
     def _merge_regions(self, raw_regions):
         cfg = self.config
