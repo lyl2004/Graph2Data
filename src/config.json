@@ -1,0 +1,11 @@
+{
+  "save_dir": "D:\\Code\\Python\\Graph2Data",
+  "x_scale": "线性",
+  "y_scale": "线性",
+  "dirty_mode": "允许外推",
+  "clean_method": "不剔除",
+  "clean_thresh": 3.0,
+  "fit_method": "不拟合",
+  "use_corner": true,
+  "corner_thresh": 0.1
+}
