@@ -27,19 +27,33 @@ Graph2Data 是一个面向科学图表的数据恢复项目，目标是从论文
 
 ```text
 basic_curves:
-  mean_chamfer_distance_px ≈ 0.83
+  mean_chamfer_distance_px ≈ 0.85
   mean_mask_tolerant_f1    ≈ 0.89
 
 achromatic_curves:
   mean_chamfer_distance_px ≈ 0.87
   mean_mask_tolerant_f1    ≈ 0.89
 
+local_occlusion_curves:
+  mean_chamfer_distance_px ≈ 0.96
+  mean_hausdorff_distance_px ≈ 13.8
+  mean_data_y_rmse ≈ 0.012
+
+crossing_curves:
+  mean_chamfer_distance_px ≈ 0.94
+  mean_hausdorff_distance_px ≈ 8.8
+  mean_data_y_rmse ≈ 0.0095
+
 legend_inside_curves，不排除图例:
   mean_chamfer_distance_px ≈ 5.13
   mean_hausdorff_distance_px ≈ 252.40
 
+legend_inside_curves，排除图像启发式检测到的图例区域:
+  mean_chamfer_distance_px ≈ 0.85
+  mean_hausdorff_distance_px ≈ 6.40
+
 legend_inside_curves，排除合成图例区域:
-  mean_chamfer_distance_px ≈ 0.83
+  mean_chamfer_distance_px ≈ 0.85
   mean_hausdorff_distance_px ≈ 6.40
 ```
 
@@ -47,8 +61,97 @@ legend_inside_curves，排除合成图例区域:
 
 ```text
 已完成：第一版纯图形学分辨基线和 benchmark 闭环。
-正在推进：真实图例检测、mask/debug artifact、坐标轴和 OCR 结果的稳定融合。
-尚未完成：刻度 OCR 语义解析、完整图例解析、复杂交叉/重叠曲线归属、像素路径到最终数据 CSV 的正式映射出口。
+正在推进：图像启发式图例检测的真实图扩展、坐标轴和 OCR 结果的稳定融合、困难曲线场景扩展。
+尚未完成：刻度 OCR 语义解析、完整图例解析、复杂交叉/重叠曲线归属、CSV 校正模块作为 pipeline 后处理内核的正式复用。
+```
+
+## 当前节点展示
+
+截至当前节点，项目已经具备一次阶段展示所需的最小完整材料：
+
+- 一条正式 pipeline：`图像 -> 坐标轴 -> 曲线颜色 -> mask -> path -> data CSV -> quality/report.json`。
+- 五类固定 synthetic 场景：基础彩色曲线、黑灰/彩色混合曲线、局部短遮挡、轻度交叉、绘图区内图例污染。
+- 一组自动质量门：pytest 回归测试、compileall、固定 benchmark suite。
+- 一组可视化 artifact：mask、overview、paths_overlay、逐曲线 path overlay、数据 CSV、质量报告。
+- `paths_overlay.png` 会跳过不连续片段之间的超长连接，避免把尚未可靠连接的 mask 污染片段画成跨图直线。
+
+推荐展示命令分为四组。
+
+第一组：验证工程质量门。
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m pytest -q
+pixi run python -m compileall -q src tests
+```
+
+第二组：运行完整 synthetic benchmark suite。该 suite 会生成并评估 5 类场景：
+
+```text
+basic_curves             基础彩色曲线
+achromatic_curves        黑灰/彩色混合曲线
+local_occlusion_curves   局部短遮挡/断裂
+crossing_curves          颜色可分的轻度交叉曲线
+legend_inside_curves     绘图区内图例污染
+```
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.benchmark --suite --suite_out temp\suite_stage_demo
+Get-Content temp\suite_stage_demo\results\suite_summary.json
+```
+
+第三组：运行真实样例图的完整 pipeline，输出 mask、path、数据 CSV、debug 图和质量报告。
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\stage_demo_pipeline.json --map_data --x_min 0 --x_max 100 --y_min -10 --y_max 10 --artifact_dir temp\stage_demo_artifacts --debug_artifacts
+Get-ChildItem -Recurse temp\stage_demo_artifacts
+Get-Content temp\stage_demo_artifacts\quality\report.json
+```
+
+第四组：单独复现重点困难场景，便于展示局部能力。
+
+```powershell
+$env:PYTHONPATH='src'
+
+# 局部短遮挡/断裂
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name local_occlusion_curves --palette basic --local_occlusion
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\local_occlusion_curves --mode predicted-mask --mask_out temp\local_occlusion_predicted_masks --out temp\local_occlusion_pred_benchmark.json
+Get-Content temp\local_occlusion_pred_benchmark.json
+
+# 轻度交叉曲线
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name crossing_curves --palette basic --crossing_curves
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\crossing_curves --mode predicted-mask --mask_out temp\crossing_predicted_masks --out temp\crossing_pred_benchmark.json
+Get-Content temp\crossing_pred_benchmark.json
+
+# 绘图区内图例污染，对比不排除图例和图像启发式排除图例
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name legend_inside_curves --palette basic --legend_inside
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_inside_curves --mode predicted-mask --mask_out temp\legend_no_exclude_masks --out temp\legend_no_exclude.json
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_inside_curves --mode predicted-mask --detect_legend --mask_out temp\legend_detected_exclude_masks --out temp\legend_detected_exclude.json
+Get-Content temp\legend_no_exclude.json
+Get-Content temp\legend_detected_exclude.json
+```
+
+展示时可以重点说明：
+
+- 目前对颜色可分、函数型曲线的恢复已经形成稳定工程闭环。
+- 局部短遮挡和轻度交叉已经进入固定回归测试，数据空间误差仍保持在较低水平。
+- 绘图区内图例污染会显著拉高误差，但图像启发式图例排除可以把指标恢复到正常范围。
+- `tests/test1.png` 属于真实灰度样例，mask 中仍可能包含图例、marker、文字或边框残留；当前展示应把它作为诊断样例，而不是证明真实灰度图已经完全解决。
+- 当前尚不是“任意论文图全自动解析”，下一阶段应优先推进刻度 OCR 语义解析、完整图例解析、marker 曲线和同色不同线型。
+
+展示时重点查看的输出文件：
+
+```text
+temp/suite_stage_demo/results/suite_summary.json
+temp/stage_demo_pipeline.json
+temp/stage_demo_artifacts/data/curves.csv
+temp/stage_demo_artifacts/debug/overview.png
+temp/stage_demo_artifacts/debug/paths_overlay.png
+temp/stage_demo_artifacts/debug/paths/*.png
+temp/stage_demo_artifacts/masks/*.png
+temp/stage_demo_artifacts/quality/report.json
 ```
 
 ## 当前项目结构
@@ -95,10 +198,11 @@ legend.py       初版图例区域检测
 ocr.py          RapidOCR 包装
 colors.py       曲线颜色原型提取
 masks.py        根据颜色原型生成曲线 mask
+lines.py        mask 骨架化和有序路径追踪
+mapping.py      像素路径到数据坐标的映射和 CSV 输出
 pipeline.py     结构化 pipeline 入口
 synthetic.py    合成 benchmark 生成器
 quality.py      最小质量评估工具
-lines.py        mask 骨架化和有序路径追踪
 benchmark.py    批量 benchmark runner
 ```
 
@@ -108,6 +212,24 @@ benchmark.py    批量 benchmark runner
 $env:PYTHONPATH='src'
 pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1.json --colors
 ```
+
+如需在正式 pipeline 中继续生成曲线 mask 和有序像素路径：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1_paths.json --paths --artifact_dir temp\pipeline_test1_artifacts --debug_artifacts
+```
+
+其中 `--paths` 会自动启用颜色原型和 mask 提取，`--artifact_dir` 会保存每条曲线的 mask PNG 和 `quality/report.json`。`--debug_artifacts` 会额外输出 overview、全局路径 overlay 和逐曲线路径 overlay，便于定位坐标轴、图例、mask 和 path 的问题。
+
+如需提供坐标范围并导出数据空间 CSV：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1_mapped.json --map_data --x_min 0 --x_max 100 --y_min -10 --y_max 10 --artifact_dir temp\pipeline_test1_mapped_artifacts --debug_artifacts
+```
+
+其中 `--map_data` 会自动启用颜色原型、mask、path 和数据坐标映射，并输出 `data/curves.csv` 和 `quality/report.json`。
 
 如需开启 OCR：
 
@@ -120,11 +242,11 @@ pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline
 
 当前下一步工程任务：
 
-1. 在 `pipeline.py` 中输出更多可视化 debug artifact，包括坐标轴候选、plot area、legend bbox、颜色 prototype、预测 mask 和 skeleton overlay。
+1. 在 `pipeline.py` 中继续补全可视化 debug artifact，包括坐标轴候选细节、颜色 prototype 和 skeleton overlay；plot area、legend bbox、预测 mask、path overlay、映射 CSV 和基础质量报告已可通过 `--artifact_dir --debug_artifacts --map_data` 输出。
 2. 将 `legend.py` 从“只根据 OCR 文本簇排除污染区域”升级为“图例区域检测 + 图例样本提取 + 标签绑定”的两阶段结构。
 3. 扩展 `synthetic.py` 的场景覆盖：虚线密度变化、marker 曲线、轻度交叉、局部遮挡、同色不同线型、log 坐标轴。
 4. 增强 `lines.py` 的片段连接代价函数，从当前距离/角度规则升级为距离、切线、曲率、线型周期和交叉惩罚的组合评分。
-5. 建立 `mapping.py`，把 `CurvePath` 的像素点正式映射到数据空间，并复用 `csv_processor.py` 的清洗、拟合和导出能力。
+5. 继续完善 `mapping.py` 和数据空间质量评估，并把 `csv_processor.py` 的清洗、拟合和导出能力作为正式后处理内核接入 pipeline。
 
 生成一个带真值数据的合成 benchmark：
 
@@ -193,8 +315,23 @@ pixi run python -m graph2data.benchmark --suite --suite_out temp\suite_check
 ```text
 basic_curves          彩色多曲线，图例在绘图区外
 achromatic_curves     黑色/灰色/彩色曲线共存
+local_occlusion_curves 曲线局部短遮挡/断裂，真值数据保持完整
+crossing_curves        颜色可分的轻度交叉曲线
 legend_inside_curves  图例位于绘图区内，用于测试图例污染
 ```
+
+运行自动化回归测试：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m pytest -q
+```
+
+当前 pytest 会检查三类质量门：
+
+- `pipeline --paths/--map_data` 能在真实样例上输出曲线 mask、有序路径、数据序列、CSV 和 debug artifact，且不会把普通曲线区域误检为图例。
+- `mapping.py` 能把已知像素路径正确映射到数据坐标。
+- 固定合成 benchmark 的核心指标不超过阈值，包括 Chamfer、Hausdorff 和 2px 容差 F1，并验证真值图例排除和图像启发式图例排除都能显著降低污染误差。
 
 生成黑色/灰色曲线共存的基准图：
 
@@ -202,6 +339,22 @@ legend_inside_curves  图例位于绘图区内，用于测试图例污染
 $env:PYTHONPATH='src'
 pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name achromatic_curves --palette achromatic
 pixi run python -m graph2data.benchmark --case benchmarks\synthetic\achromatic_curves --mode predicted-mask --mask_out temp\achromatic_predicted_masks --out temp\achromatic_pred_benchmark.json
+```
+
+生成局部遮挡/断裂曲线基准图：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name local_occlusion_curves --palette basic --local_occlusion
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\local_occlusion_curves --mode predicted-mask --mask_out temp\local_occlusion_predicted_masks --out temp\local_occlusion_pred_benchmark.json
+```
+
+生成轻度交叉曲线基准图：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name crossing_curves --palette basic --crossing_curves
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\crossing_curves --mode predicted-mask --mask_out temp\crossing_predicted_masks --out temp\crossing_pred_benchmark.json
 ```
 
 生成图例位于绘图区内的基准图，并对比是否排除图例区域：
@@ -220,19 +373,23 @@ pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_insid
 - 将骨架像素构造成 8 邻域图。
 - 检测端点和交叉/分叉点。
 - 对单连通曲线追踪主路径。
-- 对虚线/点线等多连通分量，先逐片段追踪，再按 X 方向拼接。
-- 对合理距离和角度内的片段间隔执行第一版直线 gap linking。
+- 对虚线/点线等多连通分量，先逐片段追踪，再按综合连接评分排序拼接。
+- 综合连接评分当前以距离、端点切线方向、下一段切线方向和轻量曲率连续性为默认约束，并保留 X 方向重叠、超长 gap 和短片段惩罚的可配置权重，减少“更近但急转弯”的错误连接。
+- 对合理距离、整体角度和端点切线角度内的片段间隔执行直线 gap linking；端点切线角度默认阈值为 55 度，可通过 `--max_gap_tangent_angle` 调整。
+- 可通过 `--tangent_gap_interpolation` 试用切线引导 Hermite 补全；当前 benchmark 显示它对现有合成 suite 不如默认直线补全稳定，因此不是默认策略。
+- 在路径追踪前执行短毛刺剪枝，删除端点到交叉点之间的短分支，降低 marker、抗锯齿残留、网格/文字污染造成的伪分叉影响；可通过 `--max_spur_length` 调整，或用 `--no_spur_pruning` 关闭。
 - 在 `completed_ranges` 和 `completed_pixel_count` 中记录补全位置和数量。
 - 在 `confidence_per_point` 中记录点级置信度；原始观测点为高置信度，补全点为低置信度。
 
 这能为后续的方向约束、曲率约束、虚线间距建模和机器学习 centerline 输出提供统一路径结构。
 
-当前 `quality.py` 已支持两类基础指标：
+当前 `quality.py` 已支持多层基础指标：
 
 - 坐标轴检测误差：绘图区边界误差、原点误差、轴终点误差。
 - 曲线路径误差：Chamfer distance、Hausdorff distance、pred-to-truth 和 truth-to-pred 距离分布。
 - observed/completed 分离误差：分别评估真实观测点和补全点相对真值曲线的偏差。
 - `benchmark.py` 在 predicted-mask 模式下额外输出 mask 级指标：IoU、Precision、Recall、F1，以及 2px 容差版 Precision/Recall/F1。
+- 数据空间误差：`quality.py --data_series` 和固定 benchmark suite 会输出 `data_y_mae`、`data_y_rmse`、`data_y_max_abs_error`、`data_y_p95_abs_error`、`data_r2_at_pred_x` 和 `data_x_coverage_ratio`。
 
 其中 truth-to-pred 距离对虚线和遮挡尤其重要，因为它能反映真值曲线中有多少区域没有被提取路径覆盖。
 
@@ -242,24 +399,47 @@ pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_insid
 
 ```text
 basic_curves predicted-mask:
-  mean_chamfer_distance_px ≈ 0.83
-  mean_truth_to_pred_px    ≈ 0.87
+  mean_chamfer_distance_px ≈ 0.85
+  mean_truth_to_pred_px    ≈ 0.89
   mean_mask_tolerant_f1    ≈ 0.89
+  mean_data_y_rmse         ≈ 0.012
+  mean_data_r2_at_pred_x   ≈ 0.9997
 
 achromatic_curves predicted-mask:
   mean_chamfer_distance_px ≈ 0.87
   mean_truth_to_pred_px    ≈ 0.92
   mean_mask_tolerant_f1    ≈ 0.89
+  mean_data_y_rmse         ≈ 0.012
+  mean_data_r2_at_pred_x   ≈ 0.9997
+
+local_occlusion_curves predicted-mask:
+  mean_chamfer_distance_px ≈ 0.96
+  mean_hausdorff_distance_px ≈ 13.8
+  mean_mask_tolerant_f1    ≈ 0.89
+  mean_completed_point_ratio ≈ 0.32
+  mean_data_y_rmse         ≈ 0.012
+  mean_data_r2_at_pred_x   ≈ 0.9997
+
+crossing_curves predicted-mask:
+  mean_chamfer_distance_px ≈ 0.94
+  mean_hausdorff_distance_px ≈ 8.8
+  mean_mask_tolerant_f1    ≈ 0.88
+  mean_data_y_rmse         ≈ 0.0095
+  mean_data_r2_at_pred_x   ≈ 0.9994
 
 legend_inside_curves predicted-mask，不排除图例:
   mean_chamfer_distance_px ≈ 5.13
   mean_hausdorff_distance_px ≈ 252.40
   mean_mask_tolerant_f1    ≈ 0.87
+  mean_data_y_rmse         ≈ 0.55
+  mean_data_r2_at_pred_x   ≈ 0.15
 
 legend_inside_curves predicted-mask，排除合成图例区域:
-  mean_chamfer_distance_px ≈ 0.83
+  mean_chamfer_distance_px ≈ 0.85
   mean_hausdorff_distance_px ≈ 6.40
   mean_mask_tolerant_f1    ≈ 0.89
+  mean_data_y_rmse         ≈ 0.012
+  mean_data_r2_at_pred_x   ≈ 0.9997
 ```
 
 `achromatic_curves` 用于验证黑色曲线、灰色曲线和彩色曲线共存时的分辨能力。当前策略包括：
@@ -272,15 +452,19 @@ legend_inside_curves predicted-mask，排除合成图例区域:
 图例污染处理已经开始：
 
 - `legend.py` 根据绘图区内 OCR 文本簇给出保守的 legend bbox 候选。
+- `legend.py` 也支持图像启发式检测常见带框内置图例，可识别 upper-left、lower-right 等角落位置。
 - `pipeline.py` 在开启 OCR 和颜色提取时，会将检测到的 legend bbox 传给颜色提取模块作为排除区域。
 - `colors.py` 和 `masks.py` 均支持 `exclude_regions`，用于在颜色原型提取或 mask 生成时排除图例区域。
 - `synthetic.py` 支持 `--legend_inside`，用于稳定复现绘图区内图例污染。
+- `synthetic.py` 支持 `--local_occlusion`，用于稳定复现曲线短遮挡/断裂并验证补全质量。
+- `synthetic.py` 支持 `--crossing_curves`，用于稳定复现颜色可分的轻度交叉曲线。
 - `benchmark.py` 的 predicted-mask 模式支持 `--exclude_legend`；固定 suite 会对 `legend_inside_curves` 同时输出排除前和排除后的指标。
 
 该能力目前分为两层：
 
 ```text
 真实 pipeline：使用 OCR 文本簇启发式检测 legend bbox。
+真实 pipeline：使用图像启发式检测内置带框 legend bbox。
 合成 benchmark：使用已知合成图例区域作为排除框，保证图例污染前后对比可复现。
 ```
 
@@ -656,6 +840,323 @@ OCR 刻度解析置信度
 ```
 
 核心原因是：如果没有统一数据结构、真值数据和误差指标，每个模块都可能看起来有效，但无法判断整体结果是否真正变好。
+
+## 工程实现阶段规划
+
+本项目的实现过程按“先闭环、再提高鲁棒性、最后产品化”的顺序推进。每个阶段都应留下可运行命令、结构化输出、debug artifact 和自动化质量门，避免算法改动只能靠肉眼判断。
+
+### 阶段 A：工程基线与最小闭环
+
+阶段目标：
+
+建立正式包结构和统一数据接口，使项目从松散原型脚本进入可维护的工程形态。
+
+工作内容：
+
+- 将 `tests/` 下成熟的图像处理原型迁移到 `src/graph2data/`。
+- 建立 `models.py`，统一 `AxisDetection`、`PlotArea`、`CurvePrototype`、`CurveMask`、`CurvePath`、`DataSeries`、`PipelineResult` 等核心对象。
+- 建立 `pipeline.py`，串联图像读取、坐标轴检测、版面划分、颜色原型提取、mask 提取、path 提取、数据映射和 artifact 输出。
+- 建立 `image_io.py`，统一 JSON、目录和图像 artifact 写入方式。
+- 保留旧的 CSV 校正工具，但将其定位为后续数据后处理内核。
+
+期望结果：
+
+- 能通过一条命令完成 `图像 -> mask -> path -> CSV` 的最小闭环。
+- pipeline 输出结构化 JSON，而不是只依赖控制台打印或窗口展示。
+- 所有阶段性结果都有明确字段和 artifact 路径。
+
+验收条件：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\pipeline_test1_mapped.json --map_data --x_min 0 --x_max 100 --y_min -10 --y_max 10 --artifact_dir temp\pipeline_test1_mapped_artifacts --debug_artifacts
+```
+
+应生成：
+
+```text
+temp/pipeline_test1_mapped.json
+temp/pipeline_test1_mapped_artifacts/masks/*.png
+temp/pipeline_test1_mapped_artifacts/debug/overview.png
+temp/pipeline_test1_mapped_artifacts/debug/paths_overlay.png
+temp/pipeline_test1_mapped_artifacts/data/curves.csv
+temp/pipeline_test1_mapped_artifacts/quality/report.json
+```
+
+当前状态：基本完成，后续只做增量补强。
+
+### 阶段 B：Benchmark 与质量门
+
+阶段目标：
+
+建立可复现、可量化、可失败的回归测试体系，使算法改动可以被客观比较。
+
+工作内容：
+
+- 完善 `synthetic.py`，生成图像、坐标轴真值、曲线真值数据、曲线真值 mask。
+- 完善 `quality.py`，支持坐标轴误差、mask 指标、path 指标和数据空间指标。
+- 完善 `benchmark.py`，支持固定 suite、单 case 评估、图例排除对比、检测图例排除对比。
+- 建立 pytest 回归测试，覆盖 pipeline 闭环、mapping 正确性、图例检测、gap linking 和 benchmark 阈值。
+- 将 `pixi run python -m pytest -q` 作为每次算法改造后的基本质量门。
+
+期望结果：
+
+- 任意一次算法改动都能回答“变好了还是变坏了”。
+- 图例污染、黑灰曲线、多色曲线、虚线补全等核心风险都有基准场景。
+- pytest 不再出现 `no tests ran`，而是运行真实测试。
+
+验收条件：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m pytest -q
+pixi run python -m graph2data.benchmark --suite --suite_out temp\suite_check
+```
+
+期望：
+
+```text
+pytest 全部通过
+basic_curves / achromatic_curves / local_occlusion_curves / crossing_curves / legend_inside_curves 均有稳定指标
+legend_inside_curves 中 image_heuristic 图例排除能显著降低 Hausdorff
+```
+
+当前状态：已建立，后续随着新场景继续扩充。
+
+### 阶段 C：可视化 Debug 与人工诊断能力
+
+阶段目标：
+
+让每个算法阶段的错误都能被定位，而不是只看到最终 CSV 错误。
+
+工作内容：
+
+- 输出坐标轴、plot area、legend bbox、颜色 prototype、mask、path 和数据映射结果。
+- 增加 `--debug_artifacts`，生成 overview、全局 path overlay、逐曲线 path overlay。
+- 在 `quality/report.json` 中输出轴、图例、mask/path/data 数量、补全比例、低置信度点比例和逐曲线摘要。
+- 后续补充 skeleton overlay、候选坐标轴 overlay、OCR box overlay、图例样本 overlay。
+- 在 `PipelineResult.artifacts` 中记录所有 artifact 路径，便于 GUI 或批处理报告引用。
+
+期望结果：
+
+- mask 污染、路径断裂、图例误检、坐标轴偏移等问题能通过图片直接定位。
+- benchmark 输出不只是 JSON 指标，也能保留关键 debug 图。
+
+验收条件：
+
+```text
+debug/overview.png          能看到 plot area、坐标轴和图例框
+debug/paths_overlay.png     能看到所有曲线的 path 覆盖情况
+debug/paths/<curve_id>.png  能逐曲线检查路径质量
+masks/<curve_id>.png        能单独检查颜色分割结果
+quality/report.json         能看到单张图的基础质量摘要
+```
+
+当前状态：基础 artifact 已完成，skeleton、OCR、候选轴线 overlay 待补。
+
+### 阶段 D：图例检测与图例解析
+
+阶段目标：
+
+降低图例对颜色原型、mask 和路径追踪的污染，并逐步建立曲线标签绑定能力。
+
+工作内容：
+
+- 当前阶段先完成图像启发式图例检测：识别常见内置带框图例，支持 upper-left、lower-right 等角落位置。
+- 将检测到的图例 bbox 作为 `exclude_regions`，在颜色原型和 mask 提取前排除。
+- 在 benchmark 中同时评估三种模式：不排除图例、使用真值图例排除、使用图像启发式图例排除。
+- 下一步增加图例样本提取：从图例区域识别线段颜色、线型和标签文字。
+- 再下一步建立标签绑定：将图例样本与曲线 prototype/path 绑定，输出曲线名称。
+
+期望结果：
+
+- 绘图区内图例不再显著拉高 path Hausdorff。
+- 检测图例排除的指标接近真值图例排除。
+- 普通曲线密集区域不应被误检为图例。
+
+验收条件：
+
+```text
+legend_inside_curves，不排除图例:
+  Hausdorff 显著偏高
+
+legend_inside_curves，image_heuristic 图例排除:
+  detected_legend_count >= 1
+  mean_hausdorff_distance_px 回到正常范围
+```
+
+当前状态：第一版图像启发式排除已完成；完整图例解析和标签绑定待做。
+
+### 阶段 E：曲线颜色、Mask 与路径追踪算法
+
+阶段目标：
+
+提高从曲线像素到有序路径的稳定性，降低断线、误连、交叉和重叠带来的错误。
+
+工作内容：
+
+- 优化 `colors.py`：提高黑色、灰色、低饱和曲线和抗锯齿边缘的 prototype 稳定性。
+- 优化 `masks.py`：降低网格线、文字、坐标轴和图例残留污染。
+- 优化 `lines.py`：将多连通分量按距离、方向、端点切线和曲率连续性综合排序，并预留 X 重叠、超长 gap 和短片段惩罚权重。
+- 当前已增加 gap linking 的端点切线角约束，可通过 `--max_gap_tangent_angle` 调整。
+- 当前已增加骨架短毛刺剪枝，减少伪分叉对主路径追踪的影响。
+- 当前已加入局部遮挡/断裂 synthetic case，用于验证 gap linking 对短缺失段的补全质量。
+- 当前已加入轻度交叉 synthetic case，用于验证颜色可分交叉区域的 mask、path 和数据空间稳定性。
+- 后续加入 marker 曲线、同色不同线型、虚线密度变化等 synthetic case。
+
+期望结果：
+
+- 虚线/点线能保持较高 truth-to-pred 覆盖率。
+- 不合理跨段连接减少。
+- 曲线交叉区域能保留明确 warnings 或低置信度，而不是静默输出错误路径。
+
+验收条件：
+
+```text
+basic_curves:
+  mean_chamfer_distance_px < 1.25
+  mean_mask_tolerant_f1 > 0.85
+
+achromatic_curves:
+  valid_curve_count == curve_count
+
+新增困难场景:
+  指标有明确阈值
+  出现歧义时有 warnings 或低置信度记录
+```
+
+当前状态：路径追踪、短毛刺剪枝、综合片段连接评分、gap linking、局部短遮挡 benchmark 和轻度交叉 benchmark 已可用；复杂交叉、同色线型归属、线型周期建模和长遮挡补全待做。
+
+### 阶段 F：坐标轴、OCR 与数据空间映射
+
+阶段目标：
+
+让系统从“像素路径”真正进入“数据坐标”，并逐步减少用户手动输入坐标范围的依赖。
+
+工作内容：
+
+- 当前 `mapping.py` 已支持根据 plot area 和用户提供的 `DataRange` 将 `CurvePath` 映射为 `DataSeries`。
+- 当前 pipeline 已支持 `--map_data` 并输出 `data/curves.csv`。
+- 当前 `quality.py` 和 `benchmark.py` 已支持数据空间 RMSE、MAE、Max Error、P95 Error、R2 和 X 覆盖率评估。
+- 下一步实现 tick OCR 语义解析：识别刻度文字、单位、数值范围和 log/inverse 轴。
+- 将 OCR 结果、坐标轴检测结果和 layout 区域合并为可靠的坐标系推断。
+- 后续补充单调性检查、越界比例和基于 OCR 的自动坐标范围推断。
+
+期望结果：
+
+- 用户提供坐标范围时，能稳定输出数据坐标 CSV。
+- 对合成 benchmark，能直接评估数据空间误差。
+- 对真实图，能逐步从手动范围输入过渡到 OCR 辅助识别。
+
+验收条件：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.pipeline --img tests\test1.png --out temp\mapped.json --map_data --x_min 0 --x_max 100 --y_min -10 --y_max 10 --artifact_dir temp\mapped_artifacts
+```
+
+应输出：
+
+```text
+data_series 非空
+data/curves.csv 存在
+每个 DataPoint 包含 x/y、pixel_x/pixel_y、confidence、completed
+```
+
+当前状态：手动范围映射和数据空间质量评估已完成；OCR 刻度语义解析、自动坐标范围推断、单调性和越界质量指标待做。
+
+### 阶段 G：后处理、清洗、拟合与导出
+
+阶段目标：
+
+将本地图像提取结果和已有 CSV 校正能力统一起来，输出可直接分析的数据表和质量报告。
+
+工作内容：
+
+- 将 `csv_processor.py` 中的坐标映射、清洗、拟合和导出能力重构为可被 pipeline 调用的后处理模块。
+- 支持对 `DataSeries` 做去重、排序、离群点剔除、插值、PCHIP、B-spline、GPR 等处理。
+- 输出 corrected CSV、可选 Excel、质量报告 JSON。
+- 在报告中记录补全比例、低置信度点比例、清洗删除点数、拟合残差和 warnings。
+
+期望结果：
+
+- 外部 CSV 工作流和本地图像提取工作流共用同一套后处理逻辑。
+- 用户能选择“原始提取点”或“清洗拟合后曲线”导出。
+- 每条曲线都有质量摘要。
+
+验收条件：
+
+```text
+输入 DataSeries
+-> 输出 raw CSV
+-> 输出 corrected CSV
+-> 输出 quality_report.json
+-> GUI/CLI 均可调用
+```
+
+当前状态：CSV 校正工具独立可用；正式接入 pipeline 待做。
+
+### 阶段 H：真实图鲁棒性、人工修正与产品化
+
+阶段目标：
+
+让工具从研发基线过渡到可用于真实论文图和实验图的半自动数据恢复工具。
+
+工作内容：
+
+- 建立真实图测试集，覆盖论文截图、低分辨率压缩图、浅色曲线、复杂图例、双轴图、log 坐标图。
+- 为无法自动确定的区域输出 ambiguous 状态，而不是强行给出错误结果。
+- 增加人工修正入口：plot area 修正、坐标范围修正、图例排除框修正、曲线路径局部修正。
+- 将 CLI、批处理和 GUI 整合，支持批量图像处理和报告导出。
+- 对困难区域逐步引入机器学习分割或交互式修正模型，但保留可解释中间结果。
+
+期望结果：
+
+- 真实图处理失败时能说明失败原因和低置信度区域。
+- 用户可以修正关键中间结果并重新运行后续阶段。
+- 输出不只是 CSV，还包含质量报告和 debug artifact。
+
+验收条件：
+
+```text
+真实图批处理可运行
+失败样例有明确 warnings
+人工修正后可复跑后续步骤
+导出数据表 + 质量报告 + debug artifact
+```
+
+当前状态：尚未进入产品化阶段。
+
+### 阶段 I：机器学习增强
+
+阶段目标：
+
+在图形学基线和 benchmark 足够稳定后，用机器学习处理传统规则难以覆盖的分割、归属和补全问题。
+
+工作内容：
+
+- 基于 synthetic 和真实标注数据构建训练集。
+- 训练或接入曲线实例分割模型，输出曲线 mask 或 centerline probability map。
+- 使用模型处理交叉、重叠、遮挡、同色不同线型等困难区域。
+- 将模型输出接入现有 `CurveMask`、`CurvePath`、`DataSeries` 结构，而不是绕过工程闭环。
+- 继续用 benchmark 和真实图集评估模型收益，避免模型在简单场景上退化。
+
+期望结果：
+
+- 机器学习只替换或增强困难模块，不破坏现有可解释 pipeline。
+- 模型输出有置信度和 fallback 策略。
+- 简单图仍可由图形学稳定处理，复杂图由模型辅助。
+
+验收条件：
+
+```text
+模型输出可转换为 CurveMask / CurvePath
+简单 benchmark 不退化
+困难 benchmark 指标显著改善
+低置信度区域能回传给人工修正流程
+```
+
+当前状态：暂不作为主路径，待前述阶段稳定后进入。
 
 ### 阶段 0：工程化原型
 

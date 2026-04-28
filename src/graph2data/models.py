@@ -135,6 +135,40 @@ class CurvePath:
 
 
 @dataclass
+class DataRange:
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    x_scale: str = "linear"
+    y_scale: str = "linear"
+
+
+@dataclass
+class DataPoint:
+    x: float
+    y: float
+    pixel_x: float
+    pixel_y: float
+    confidence: float = 1.0
+    completed: bool = False
+
+
+@dataclass
+class DataSeries:
+    curve_id: str
+    points: List[DataPoint]
+    data_range: DataRange
+    point_count: int = 0
+    completed_point_count: int = 0
+    x_min: Optional[float] = None
+    x_max: Optional[float] = None
+    y_min: Optional[float] = None
+    y_max: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class PipelineResult:
     image_path: str
     image_size: Tuple[int, int]
@@ -143,6 +177,10 @@ class PipelineResult:
     layout: Optional[LayoutResult] = None
     legends: List[LegendDetection] = field(default_factory=list)
     curves: List[CurvePrototype] = field(default_factory=list)
+    curve_masks: List[CurveMask] = field(default_factory=list)
+    curve_paths: List[CurvePath] = field(default_factory=list)
+    data_series: List[DataSeries] = field(default_factory=list)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
 

@@ -21,11 +21,23 @@ Pixel = Tuple[int, int]  # (x, y)
 class PathTracingConfig:
     threshold: int = 127
     min_component_pixels: int = 1
+    prune_spurs: bool = True
+    max_spur_length_px: int = 12
     prefer_longest_component: bool = False
     enable_gap_linking: bool = True
     max_gap_px: float = 45.0
     max_gap_angle_deg: float = 60.0
+    max_gap_tangent_angle_deg: float = 55.0
+    use_tangent_gap_interpolation: bool = False
     backward_x_tolerance_px: float = 2.0
+    segment_tangent_weight: float = 0.18
+    segment_next_tangent_weight: float = 0.12
+    segment_curvature_weight: float = 0.03
+    segment_overlap_penalty: float = 20.0
+    segment_overlap_weight: float = 0.0
+    segment_long_gap_weight: float = 0.0
+    segment_short_length_threshold: int = 4
+    segment_short_length_penalty: float = 0.0
     completed_point_confidence: float = 0.35
 
 
@@ -48,6 +60,12 @@ class LinePathExtractor:
 
         components = _connected_components(pixels)
         components = [c for c in components if len(c) >= self.config.min_component_pixels]
+        if self.config.prune_spurs:
+            components = [
+                _prune_short_spurs(c, self.config.max_spur_length_px)
+                for c in components
+            ]
+            components = [c for c in components if len(c) >= self.config.min_component_pixels]
         if not components:
             return CurvePath(curve_id=curve_id, pixel_points_ordered=[], warnings=["no component above threshold"])
 
@@ -149,6 +167,75 @@ def _build_graph(pixels: Set[Pixel]) -> Dict[Pixel, List[Pixel]]:
     return graph
 
 
+def _prune_short_spurs(pixels: Set[Pixel], max_spur_length: int) -> Set[Pixel]:
+    """Remove short endpoint branches that terminate at a junction."""
+    if max_spur_length <= 0 or len(pixels) < 4:
+        return set(pixels)
+
+    pruned = set(pixels)
+    changed = True
+    while changed:
+        changed = False
+        graph = _build_orthogonal_graph(pruned)
+        endpoints = [node for node, neighbors in graph.items() if len(neighbors) == 1]
+        junctions = {node for node, neighbors in graph.items() if len(neighbors) >= 3}
+        if not endpoints or not junctions:
+            break
+
+        to_remove: Set[Pixel] = set()
+        for endpoint in endpoints:
+            branch = _trace_endpoint_branch(graph, endpoint, junctions, max_spur_length)
+            if branch:
+                to_remove.update(branch)
+        if to_remove and len(pruned) - len(to_remove) >= 2:
+            pruned.difference_update(to_remove)
+            changed = True
+    return pruned
+
+
+def _trace_endpoint_branch(
+    graph: Dict[Pixel, List[Pixel]],
+    endpoint: Pixel,
+    junctions: Set[Pixel],
+    max_spur_length: int,
+) -> List[Pixel]:
+    branch = [endpoint]
+    previous: Optional[Pixel] = None
+    current = endpoint
+    while len(branch) <= max_spur_length:
+        neighbors = [node for node in graph[current] if node != previous]
+        if len(neighbors) != 1:
+            return []
+        next_node = neighbors[0]
+        if next_node in junctions:
+            direction = (float(next_node[0] - current[0]), float(next_node[1] - current[1]))
+            continuations = [node for node in graph[next_node] if node != current]
+            has_straight_continuation = any(
+                _angle_between(direction, (float(node[0] - next_node[0]), float(node[1] - next_node[1]))) <= 45.0
+                for node in continuations
+            )
+            return [] if has_straight_continuation else branch
+        previous = current
+        current = next_node
+        branch.append(current)
+    return []
+
+
+def _build_orthogonal_graph(pixels: Set[Pixel]) -> Dict[Pixel, List[Pixel]]:
+    graph: Dict[Pixel, List[Pixel]] = {}
+    for pixel in pixels:
+        graph[pixel] = [nb for nb in _orthogonal_neighbors(pixel) if nb in pixels]
+    return graph
+
+
+def _orthogonal_neighbors(pixel: Pixel) -> Iterable[Pixel]:
+    x, y = pixel
+    yield (x - 1, y)
+    yield (x + 1, y)
+    yield (x, y - 1)
+    yield (x, y + 1)
+
+
 def _neighbors(pixel: Pixel) -> Iterable[Pixel]:
     x, y = pixel
     for dy in (-1, 0, 1):
@@ -205,6 +292,7 @@ def _trace_multi_component_path(components: Sequence[Set[Pixel]], config: PathTr
         traced.append(
             {
                 "path": path,
+                "length": len(path),
                 "min_x": min(xs),
                 "max_x": max(xs),
                 "center_x": sum(xs) / len(xs),
@@ -256,16 +344,9 @@ def _order_segments(segments: List[Dict], config: PathTracingConfig) -> List[Dic
         best_idx = None
         best_cost = float("inf")
         for idx, candidate in enumerate(remaining):
-            dx = candidate["start"][0] - current["end"][0]
-            if dx < -config.backward_x_tolerance_px:
+            cost = _segment_connection_cost(current, candidate, config)
+            if cost is None:
                 continue
-            dy = candidate["start"][1] - current["end"][1]
-            dist = math.hypot(dx, dy)
-            tangent_angle = _angle_between(current["end_tangent"], (dx, dy))
-            next_angle = _angle_between((dx, dy), candidate["start_tangent"])
-            cost = dist + 0.18 * tangent_angle + 0.12 * next_angle
-            if candidate["min_x"] < current["max_x"]:
-                cost += 20.0
             if cost < best_cost:
                 best_cost = cost
                 best_idx = idx
@@ -273,6 +354,39 @@ def _order_segments(segments: List[Dict], config: PathTracingConfig) -> List[Dic
             best_idx = min(range(len(remaining)), key=lambda i: (remaining[i]["min_x"], remaining[i]["center_y"]))
         ordered.append(remaining.pop(best_idx))
     return ordered
+
+
+def _segment_connection_cost(current: Dict, candidate: Dict, config: PathTracingConfig) -> Optional[float]:
+    """Score how plausible it is to connect current -> candidate.
+
+    Lower is better. Returning None means the candidate moves too far backward
+    in x for the current y=f(x) baseline.
+    """
+    dx = float(candidate["start"][0] - current["end"][0])
+    if dx < -config.backward_x_tolerance_px:
+        return None
+    dy = float(candidate["start"][1] - current["end"][1])
+    dist = math.hypot(dx, dy)
+    gap_vector = (dx, dy)
+    tangent_angle = _angle_between(current["end_tangent"], gap_vector)
+    next_angle = _angle_between(gap_vector, candidate["start_tangent"])
+    curvature_angle = _angle_between(current["end_tangent"], candidate["start_tangent"])
+    overlap = max(0.0, float(current["max_x"] - candidate["min_x"]))
+    long_gap = max(0.0, dist - config.max_gap_px)
+    short_len = max(0, int(config.segment_short_length_threshold) - int(candidate.get("length", len(candidate.get("path", [])))))
+
+    cost = (
+        dist
+        + config.segment_tangent_weight * tangent_angle
+        + config.segment_next_tangent_weight * next_angle
+        + config.segment_curvature_weight * curvature_angle
+        + config.segment_overlap_weight * overlap
+        + config.segment_long_gap_weight * long_gap
+        + config.segment_short_length_penalty * short_len
+    )
+    if overlap > 0:
+        cost += config.segment_overlap_penalty
+    return float(cost)
 
 
 def _interpolate_gap(
@@ -294,15 +408,45 @@ def _interpolate_gap(
     angle = abs(math.degrees(math.atan2(dy, dx if dx != 0 else 1e-9)))
     if angle > config.max_gap_angle_deg:
         return []
-    if prev_tangent is not None and _angle_between(prev_tangent, (dx, dy)) > config.max_gap_angle_deg:
+    if prev_tangent is not None and _angle_between(prev_tangent, (dx, dy)) > config.max_gap_tangent_angle_deg:
         return []
-    if next_tangent is not None and _angle_between((dx, dy), next_tangent) > config.max_gap_angle_deg:
+    if next_tangent is not None and _angle_between((dx, dy), next_tangent) > config.max_gap_tangent_angle_deg:
         return []
 
     steps = int(round(dist))
     if steps <= 1:
         return []
+    points = _interpolate_gap_points(
+        a,
+        b,
+        steps,
+        prev_tangent=prev_tangent,
+        next_tangent=next_tangent,
+        use_tangent=config.use_tangent_gap_interpolation,
+    )
+    return points
+
+
+def _interpolate_gap_points(
+    a: Pixel,
+    b: Pixel,
+    steps: int,
+    prev_tangent: Optional[Tuple[float, float]] = None,
+    next_tangent: Optional[Tuple[float, float]] = None,
+    use_tangent: bool = True,
+) -> List[Pixel]:
+    if steps <= 1:
+        return []
+    use_hermite = use_tangent and prev_tangent is not None and next_tangent is not None
+    if use_hermite:
+        return _interpolate_gap_hermite(a, b, steps, prev_tangent, next_tangent)
+    return _interpolate_gap_linear(a, b, steps)
+
+
+def _interpolate_gap_linear(a: Pixel, b: Pixel, steps: int) -> List[Pixel]:
     points: List[Pixel] = []
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
     for i in range(1, steps):
         t = i / steps
         x = int(round(a[0] + dx * t))
@@ -311,6 +455,42 @@ def _interpolate_gap(
         if p != a and p != b and (not points or points[-1] != p):
             points.append(p)
     return points
+
+
+def _interpolate_gap_hermite(
+    a: Pixel,
+    b: Pixel,
+    steps: int,
+    prev_tangent: Tuple[float, float],
+    next_tangent: Tuple[float, float],
+) -> List[Pixel]:
+    dist = math.hypot(float(b[0] - a[0]), float(b[1] - a[1]))
+    m0 = _scaled_tangent(prev_tangent, dist)
+    m1 = _scaled_tangent(next_tangent, dist)
+    points: List[Pixel] = []
+    for i in range(1, steps):
+        t = i / steps
+        t2 = t * t
+        t3 = t2 * t
+        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+        h10 = t3 - 2.0 * t2 + t
+        h01 = -2.0 * t3 + 3.0 * t2
+        h11 = t3 - t2
+        x = int(round(h00 * a[0] + h10 * m0[0] + h01 * b[0] + h11 * m1[0]))
+        y = int(round(h00 * a[1] + h10 * m0[1] + h01 * b[1] + h11 * m1[1]))
+        p = (x, y)
+        if p != a and p != b and (not points or points[-1] != p):
+            points.append(p)
+    return points
+
+
+def _scaled_tangent(tangent: Tuple[float, float], gap_distance: float) -> Tuple[float, float]:
+    tx, ty = tangent
+    norm = math.hypot(tx, ty)
+    if norm == 0:
+        return (0.0, 0.0)
+    scale = gap_distance / norm
+    return (tx * scale, ty * scale)
 
 
 def _path_tangent(path: Sequence[Pixel], at_start: bool, window: int = 5) -> Tuple[float, float]:
@@ -402,15 +582,23 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Optional JSON output path")
     parser.add_argument("--max_gap", type=float, default=45.0, help="Maximum gap length for linking")
     parser.add_argument("--max_gap_angle", type=float, default=60.0, help="Maximum angle mismatch for gap linking")
+    parser.add_argument("--max_gap_tangent_angle", type=float, default=55.0, help="Maximum tangent mismatch for gap linking")
+    parser.add_argument("--tangent_gap_interpolation", action="store_true", help="Use tangent-guided Hermite interpolation for linked gaps")
     parser.add_argument("--min_component_pixels", type=int, default=1, help="Minimum skeleton component size")
+    parser.add_argument("--max_spur_length", type=int, default=12, help="Maximum endpoint spur length to prune before path tracing")
+    parser.add_argument("--no_spur_pruning", action="store_true", help="Disable short spur pruning")
     parser.add_argument("--no_gap_linking", action="store_true", help="Disable gap interpolation")
     args = parser.parse_args()
 
     config = PathTracingConfig(
         enable_gap_linking=not args.no_gap_linking,
         min_component_pixels=args.min_component_pixels,
+        prune_spurs=not args.no_spur_pruning,
+        max_spur_length_px=args.max_spur_length,
         max_gap_px=args.max_gap,
         max_gap_angle_deg=args.max_gap_angle,
+        max_gap_tangent_angle_deg=args.max_gap_tangent_angle,
+        use_tangent_gap_interpolation=args.tangent_gap_interpolation,
     )
     result = LinePathExtractor(config).extract_from_mask_file(args.mask, curve_id=args.curve_id)
     if args.out:

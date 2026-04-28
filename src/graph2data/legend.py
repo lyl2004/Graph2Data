@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+import cv2
+import numpy as np
+
 from .models import BoundingBox, LegendDetection, OCRTextBox, PlotArea
 
 
@@ -13,6 +16,17 @@ class LegendDetectorConfig:
     max_texts: int = 12
     padding_px: float = 10.0
     min_confidence: float = 0.15
+    image_gray_threshold: int = 245
+    image_min_component_area: int = 300
+    image_min_width_px: int = 55
+    image_min_height_px: int = 35
+    image_max_area_ratio: float = 0.20
+    image_min_area_ratio: float = 0.004
+    image_min_density: float = 0.025
+    image_max_density: float = 0.35
+    image_max_top_offset_ratio: float = 0.25
+    image_corner_margin_ratio: float = 0.06
+    image_min_frame_score: float = 0.65
 
 
 class LegendDetector:
@@ -50,6 +64,73 @@ class LegendDetector:
                         text_indices=[idx for idx, _ in cluster],
                     )
                 )
+        return detections
+
+    def detect_from_image(self, image_bgr: np.ndarray, plot_area: PlotArea) -> List[LegendDetection]:
+        """Detect compact in-plot legend clusters without OCR.
+
+        Framed Matplotlib-like legends often form a medium-sized connected
+        component of text, sample lines, and frame pixels. Plot curves and grids
+        are either full-plot components or much smaller fragments, so this
+        method deliberately keeps only compact medium-density components.
+        """
+        crop, offset = self._plot_crop(image_bgr, plot_area.bbox)
+        if crop.size == 0:
+            return []
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        mask = (gray < self.config.image_gray_threshold).astype(np.uint8)
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        h, w = mask.shape[:2]
+        plot_area_px = max(1, h * w)
+        candidates = []
+
+        for idx in range(1, num):
+            x = int(stats[idx, cv2.CC_STAT_LEFT])
+            y = int(stats[idx, cv2.CC_STAT_TOP])
+            width = int(stats[idx, cv2.CC_STAT_WIDTH])
+            height = int(stats[idx, cv2.CC_STAT_HEIGHT])
+            area = int(stats[idx, cv2.CC_STAT_AREA])
+            box_area = max(1, width * height)
+            area_ratio = box_area / plot_area_px
+            density = area / box_area
+
+            if area < self.config.image_min_component_area:
+                continue
+            if width < self.config.image_min_width_px or height < self.config.image_min_height_px:
+                continue
+            if area_ratio < self.config.image_min_area_ratio or area_ratio > self.config.image_max_area_ratio:
+                continue
+            if density < self.config.image_min_density or density > self.config.image_max_density:
+                continue
+            component = labels[y : y + height, x : x + width] == idx
+            frame_score = _frame_score(component)
+            near_top = (y / max(h, 1)) <= self.config.image_max_top_offset_ratio
+            near_corner = self._is_near_plot_corner(x, y, width, height, w, h)
+            if not near_top and not near_corner and frame_score < self.config.image_min_frame_score:
+                continue
+
+            bbox = self._component_bbox(x, y, width, height, offset, plot_area.bbox)
+            if bbox is None:
+                continue
+            score = self._image_candidate_score(area_ratio, density, frame_score)
+            candidates.append((score, bbox))
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        detections = []
+        for score, bbox in candidates:
+            if any(_bbox_iou(bbox, existing.bbox) > 0.4 for existing in detections):
+                continue
+            detections.append(
+                LegendDetection(
+                    bbox=bbox,
+                    confidence=float(score),
+                    source="image_heuristic",
+                )
+            )
         return detections
 
     def _cluster_by_rows(self, indexed_texts):
@@ -99,3 +180,64 @@ class LegendDetector:
         if x_max <= x_min or y_max <= y_min:
             return None
         return BoundingBox(x_min, y_min, x_max, y_max)
+
+    def _plot_crop(self, image_bgr: np.ndarray, plot_bbox: BoundingBox):
+        h, w = image_bgr.shape[:2]
+        x0 = max(0, int(plot_bbox.x_min))
+        y0 = max(0, int(plot_bbox.y_min))
+        x1 = min(w, int(plot_bbox.x_max))
+        y1 = min(h, int(plot_bbox.y_max))
+        return image_bgr[y0:y1, x0:x1], (x0, y0)
+
+    def _component_bbox(self, x: int, y: int, width: int, height: int, offset, plot_bbox: BoundingBox):
+        pad = self.config.padding_px
+        x_off, y_off = offset
+        x_min = max(plot_bbox.x_min, x_off + x - pad)
+        y_min = max(plot_bbox.y_min, y_off + y - pad)
+        x_max = min(plot_bbox.x_max, x_off + x + width + pad)
+        y_max = min(plot_bbox.y_max, y_off + y + height + pad)
+        if x_max <= x_min or y_max <= y_min:
+            return None
+        return BoundingBox(float(x_min), float(y_min), float(x_max), float(y_max))
+
+    def _image_candidate_score(self, area_ratio: float, density: float, frame_score: float) -> float:
+        area_score = min(1.0, area_ratio / 0.05)
+        density_score = 1.0 - min(1.0, abs(density - 0.08) / 0.08)
+        return max(
+            self.config.min_confidence,
+            min(1.0, 0.35 + 0.30 * area_score + 0.20 * density_score + 0.15 * frame_score),
+        )
+
+    def _is_near_plot_corner(self, x: int, y: int, width: int, height: int, plot_width: int, plot_height: int) -> bool:
+        margin = self.config.image_corner_margin_ratio
+        near_left = x / max(plot_width, 1) <= margin
+        near_right = (x + width) / max(plot_width, 1) >= 1.0 - margin
+        near_top = y / max(plot_height, 1) <= margin
+        near_bottom = (y + height) / max(plot_height, 1) >= 1.0 - margin
+        return (near_left or near_right) and (near_top or near_bottom)
+
+
+def _bbox_iou(a: BoundingBox, b: BoundingBox) -> float:
+    x0 = max(a.x_min, b.x_min)
+    y0 = max(a.y_min, b.y_min)
+    x1 = min(a.x_max, b.x_max)
+    y1 = min(a.y_max, b.y_max)
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    if inter <= 0:
+        return 0.0
+    union = a.width * a.height + b.width * b.height - inter
+    return inter / max(union, 1.0)
+
+
+def _frame_score(component_mask: np.ndarray) -> float:
+    if component_mask.size == 0:
+        return 0.0
+    h, w = component_mask.shape[:2]
+    if h < 6 or w < 6:
+        return 0.0
+    t = min(3, max(1, min(h, w) // 12))
+    top = np.mean(np.any(component_mask[:t, :], axis=0))
+    bottom = np.mean(np.any(component_mask[h - t :, :], axis=0))
+    left = np.mean(np.any(component_mask[:, :t], axis=1))
+    right = np.mean(np.any(component_mask[:, w - t :], axis=1))
+    return float(min(top, bottom, left, right))

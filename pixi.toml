@@ -22,6 +22,7 @@ seaborn = ">=0.12,<0.14"
 typing-extensions = ">=4.8,<5.0"
 xlsxwriter = ">=3.1,<4.0"
 pyinstaller = ">=6.18.0,<7"
+pytest = ">=9.0.3,<10"
 
 [pypi-dependencies]
 rapidocr-onnxruntime = ">=1.4.4, <2"
