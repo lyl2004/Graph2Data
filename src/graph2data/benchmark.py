@@ -60,6 +60,7 @@ def run_suite(output_root: str) -> Dict:
     cases = [
         ("basic_curves", SyntheticConfig(seed=42, n_curves=6, palette="basic")),
         ("achromatic_curves", SyntheticConfig(seed=7, n_curves=6, palette="achromatic")),
+        ("legend_inside_curves", SyntheticConfig(seed=42, n_curves=6, palette="basic", legend_inside=True)),
     ]
 
     suite_cases = []
@@ -69,29 +70,47 @@ def run_suite(output_root: str) -> Dict:
 
         truth = run_path_benchmark(case_dir)
         pred = run_predicted_mask_benchmark(case_dir, output_dir=os.path.join(result_root, f"{name}_predicted_masks"))
+        pred_excluded = None
+        pred_excluded_path = None
+        if config.legend_inside:
+            pred_excluded = run_predicted_mask_benchmark(
+                case_dir,
+                output_dir=os.path.join(result_root, f"{name}_predicted_masks_exclude_legend"),
+                exclude_legend=True,
+            )
+            pred_excluded_path = os.path.join(result_root, f"{name}_predicted_mask_exclude_legend_metrics.json")
 
         truth_path = os.path.join(result_root, f"{name}_truth_mask_metrics.json")
         pred_path = os.path.join(result_root, f"{name}_predicted_mask_metrics.json")
         write_json(truth_path, truth)
         write_json(pred_path, pred)
+        if pred_excluded is not None and pred_excluded_path is not None:
+            write_json(pred_excluded_path, pred_excluded)
 
-        suite_cases.append(
-            {
-                "name": name,
-                "case_dir": case_dir,
-                "truth_metrics": truth["summary"],
-                "predicted_metrics": pred["summary"],
-                "truth_metrics_path": truth_path,
-                "predicted_metrics_path": pred_path,
-            }
-        )
+        case_result = {
+            "name": name,
+            "case_dir": case_dir,
+            "truth_metrics": truth["summary"],
+            "predicted_metrics": pred["summary"],
+            "truth_metrics_path": truth_path,
+            "predicted_metrics_path": pred_path,
+        }
+        if pred_excluded is not None and pred_excluded_path is not None:
+            case_result["predicted_exclude_legend_metrics"] = pred_excluded["summary"]
+            case_result["predicted_exclude_legend_metrics_path"] = pred_excluded_path
+            case_result["legend_exclusion_delta"] = _legend_exclusion_delta(pred["summary"], pred_excluded["summary"])
+        suite_cases.append(case_result)
 
     suite = {"output_root": output_root, "cases": suite_cases}
     write_json(os.path.join(result_root, "suite_summary.json"), suite)
     return suite
 
 
-def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None) -> Dict:
+def run_predicted_mask_benchmark(
+    case_dir: str,
+    output_dir: Optional[str] = None,
+    exclude_legend: bool = False,
+) -> Dict:
     root = Path(case_dir)
     image_path = root / "image.png"
     truth_axes_path = root / "truth_axes.json"
@@ -106,7 +125,10 @@ def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None
     image = load_bgr(str(image_path))
     plot = truth_axes["plot_area"]
     plot_bbox = BoundingBox(plot["x_min"], plot["y_min"], plot["x_max"], plot["y_max"])
-    prototypes = CurveColorExtractor(ColorExtractorConfig(min_ratio=0.0004)).extract(image, plot_bbox)
+    exclude_regions = _synthetic_legend_exclusions(truth_axes, truth_curves) if exclude_legend else []
+    prototypes = CurveColorExtractor(ColorExtractorConfig(min_ratio=0.0004)).extract(
+        image, plot_bbox, exclude_regions=exclude_regions
+    )
 
     mask_output = Path(output_dir) if output_dir else root / "predicted_masks"
     mask_output.mkdir(parents=True, exist_ok=True)
@@ -120,7 +142,7 @@ def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None
             rows.append({"path_success": False, "curve_id": truth["curve_id"], "error": "no color prototype match"})
             continue
         matched.curve_id = truth["curve_id"]
-        mask, mask_info = mask_extractor.extract_mask(image, matched, plot_bbox)
+        mask, mask_info = mask_extractor.extract_mask(image, matched, plot_bbox, exclude_regions=exclude_regions)
         mask_path = mask_output / f"{truth['curve_id']}.png"
         cv2.imwrite(str(mask_path), mask)
         path = path_extractor.extract_from_mask_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), curve_id=truth["curve_id"])
@@ -135,6 +157,7 @@ def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None
     summary = {
         "case_dir": str(root),
         "mode": "predicted_mask",
+        "exclude_legend": exclude_legend,
         "curve_count": len(rows),
         "valid_curve_count": len(valid),
         "prototype_count": len(prototypes),
@@ -146,6 +169,28 @@ def run_predicted_mask_benchmark(case_dir: str, output_dir: Optional[str] = None
         ),
     }
     return {"summary": summary, "curves": rows, "prototypes": [to_serializable(p) for p in prototypes]}
+
+
+def _synthetic_legend_exclusions(truth_axes: Dict, truth_curves: List[Dict]) -> List[BoundingBox]:
+    """Return the known upper-left legend area for synthetic legend_inside cases.
+
+    This gives a controlled benchmark for the best-case impact of legend
+    exclusion. The OCR-based detector remains in pipeline.py for real images;
+    synthetic truth makes the before/after metric comparison deterministic.
+    """
+    plot = truth_axes["plot_area"]
+    if len(truth_curves) == 0:
+        return []
+    width = 210.0
+    height = 34.0 + 20.0 * len(truth_curves)
+    return [
+        BoundingBox(
+            float(plot["x_min"]) + 8.0,
+            float(plot["y_min"]) + 8.0,
+            min(float(plot["x_max"]), float(plot["x_min"]) + width),
+            min(float(plot["y_max"]), float(plot["y_min"]) + height),
+        )
+    ]
 
 
 def _match_prototype(hex_color: str, prototypes: List[CurvePrototype]) -> Optional[CurvePrototype]:
@@ -177,6 +222,24 @@ def _rgb_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
     return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
+def _legend_exclusion_delta(before: Dict, after: Dict) -> Dict:
+    keys = [
+        "mean_chamfer_distance_px",
+        "mean_hausdorff_distance_px",
+        "mean_truth_to_pred_px",
+        "mean_completed_to_truth_px",
+    ]
+    delta = {}
+    for key in keys:
+        before_value = before.get(key)
+        after_value = after.get(key)
+        if before_value is None or after_value is None:
+            delta[key] = None
+        else:
+            delta[key] = float(before_value) - float(after_value)
+    return delta
+
+
 def _mean(rows: List[Dict], key: str):
     values = [float(row[key]) for row in rows if row.get(key) is not None]
     if not values:
@@ -189,6 +252,7 @@ def main() -> None:
     parser.add_argument("--case", default=None, help="Synthetic case directory")
     parser.add_argument("--mode", choices=["truth-mask", "predicted-mask"], default="truth-mask")
     parser.add_argument("--mask_out", default=None, help="Optional output directory for predicted masks")
+    parser.add_argument("--exclude_legend", action="store_true", help="Exclude synthetic legend region in predicted-mask mode")
     parser.add_argument("--suite", action="store_true", help="Generate and run the standard benchmark suite")
     parser.add_argument("--suite_out", default="benchmarks/suite", help="Suite output root")
     parser.add_argument("--out", default=None, help="Optional JSON output path")
@@ -201,7 +265,7 @@ def main() -> None:
     elif args.mode == "truth-mask":
         result = run_path_benchmark(args.case)
     else:
-        result = run_predicted_mask_benchmark(args.case, args.mask_out)
+        result = run_predicted_mask_benchmark(args.case, args.mask_out, exclude_legend=args.exclude_legend)
     if args.out:
         write_json(args.out, result)
     else:

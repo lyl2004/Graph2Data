@@ -51,6 +51,7 @@ class SyntheticConfig:
     y_min: float = -1.0
     y_max: float = 5.0
     palette: str = "basic"
+    legend_inside: bool = False
 
 
 def generate_curve_family(config: SyntheticConfig) -> Tuple[np.ndarray, List[np.ndarray], List[Dict]]:
@@ -156,7 +157,10 @@ def _render_image(path: str, x: np.ndarray, y_list: List[np.ndarray], metadata: 
     ax.set_ylabel("Response")
     ax.set_title("Synthetic Benchmark: Basic Curves")
     ax.grid(True, linestyle="--", linewidth=0.6, color="#d0d0d0", alpha=0.8)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize=8, frameon=True)
+    if config.legend_inside:
+        ax.legend(loc="upper left", fontsize=8, frameon=True)
+    else:
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize=8, frameon=True)
     fig.savefig(path, dpi=config.dpi)
     plt.close(fig)
 
@@ -222,12 +226,18 @@ def main() -> None:
     parser.add_argument("--curves", type=int, default=6, help="Number of curves")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--palette", choices=["basic", "achromatic"], default="basic", help="Synthetic curve palette")
+    parser.add_argument("--legend_inside", action="store_true", help="Place legend inside the plot area")
     args = parser.parse_args()
 
     manifest = generate_benchmark(
         output_dir=args.out,
         name=args.name,
-        config=SyntheticConfig(seed=args.seed, n_curves=args.curves, palette=args.palette),
+        config=SyntheticConfig(
+            seed=args.seed,
+            n_curves=args.curves,
+            palette=args.palette,
+            legend_inside=args.legend_inside,
+        ),
     )
     print(f"Generated benchmark: {manifest['image_path']}")
 

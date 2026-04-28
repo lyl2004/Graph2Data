@@ -135,12 +135,29 @@ $env:PYTHONPATH='src'
 pixi run python -m graph2data.benchmark --suite --suite_out temp\suite_check
 ```
 
+固定 suite 当前包含三类场景：
+
+```text
+basic_curves          彩色多曲线，图例在绘图区外
+achromatic_curves     黑色/灰色/彩色曲线共存
+legend_inside_curves  图例位于绘图区内，用于测试图例污染
+```
+
 生成黑色/灰色曲线共存的基准图：
 
 ```powershell
 $env:PYTHONPATH='src'
 pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name achromatic_curves --palette achromatic
 pixi run python -m graph2data.benchmark --case benchmarks\synthetic\achromatic_curves --mode predicted-mask --mask_out temp\achromatic_predicted_masks --out temp\achromatic_pred_benchmark.json
+```
+
+生成图例位于绘图区内的基准图，并对比是否排除图例区域：
+
+```powershell
+$env:PYTHONPATH='src'
+pixi run python -m graph2data.synthetic --out benchmarks\synthetic --name legend_inside_curves --palette basic --legend_inside
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_inside_curves --mode predicted-mask --mask_out temp\legend_inside_masks_no_exclude --out temp\legend_inside_no_exclude.json
+pixi run python -m graph2data.benchmark --case benchmarks\synthetic\legend_inside_curves --mode predicted-mask --exclude_legend --mask_out temp\legend_inside_masks_exclude --out temp\legend_inside_exclude.json
 ```
 
 当前 `lines.py` 是线条提取的第一版基线：
@@ -175,6 +192,14 @@ basic_curves predicted-mask:
 achromatic_curves predicted-mask:
   mean_chamfer_distance_px ≈ 0.87
   mean_truth_to_pred_px    ≈ 0.92
+
+legend_inside_curves predicted-mask，不排除图例:
+  mean_chamfer_distance_px ≈ 5.13
+  mean_hausdorff_distance_px ≈ 252.40
+
+legend_inside_curves predicted-mask，排除合成图例区域:
+  mean_chamfer_distance_px ≈ 0.83
+  mean_hausdorff_distance_px ≈ 6.40
 ```
 
 `achromatic_curves` 用于验证黑色曲线、灰色曲线和彩色曲线共存时的分辨能力。当前策略包括：
@@ -189,8 +214,17 @@ achromatic_curves predicted-mask:
 - `legend.py` 根据绘图区内 OCR 文本簇给出保守的 legend bbox 候选。
 - `pipeline.py` 在开启 OCR 和颜色提取时，会将检测到的 legend bbox 传给颜色提取模块作为排除区域。
 - `colors.py` 和 `masks.py` 均支持 `exclude_regions`，用于在颜色原型提取或 mask 生成时排除图例区域。
+- `synthetic.py` 支持 `--legend_inside`，用于稳定复现绘图区内图例污染。
+- `benchmark.py` 的 predicted-mask 模式支持 `--exclude_legend`；固定 suite 会对 `legend_inside_curves` 同时输出排除前和排除后的指标。
 
-该能力目前是启发式的前置版本，目标是先处理明显的绘图区内图例污染。完整图例解析，包括图例样本和曲线标签绑定，仍属于后续专题。
+该能力目前分为两层：
+
+```text
+真实 pipeline：使用 OCR 文本簇启发式检测 legend bbox。
+合成 benchmark：使用已知合成图例区域作为排除框，保证图例污染前后对比可复现。
+```
+
+现阶段该模块的目标不是完整解析图例，而是先证明“图例区域应在颜色原型提取和 mask 生成前被排除”。完整图例解析，包括图例样本、曲线标签绑定、同色不同线型识别，仍属于后续专题。
 
 ## 已成型流程：CSV 校正
 
